@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"drip/internal/client/cli/ui"
+
 	"github.com/spf13/cobra"
 )
 
@@ -68,8 +69,17 @@ var versionCmd = &cobra.Command{
 			return
 		}
 
+		banner := `
+	____       _      
+	|  _ \ _ __(_)_ __ 
+	| | | | '__| | '_ \
+	| |_| | |  | | |_) |
+	|____/|_|  |_| .__/ 
+				|_|    
+			D R I P
+	`
 		fmt.Println(ui.Info(
-			"Drip Client",
+			banner,
 			"",
 			ui.KeyValue("Version", Version),
 			ui.KeyValue("Git Commit", GitCommit),

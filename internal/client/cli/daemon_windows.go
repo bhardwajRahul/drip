@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"syscall"
+
+	"golang.org/x/sys/windows"
 )
 
 // getSysProcAttr returns platform-specific process attributes for daemonization
@@ -17,11 +19,18 @@ func getSysProcAttr() *syscall.SysProcAttr {
 
 // isProcessRunningOS checks if a process is running using OS-specific method
 func isProcessRunningOS(process *os.Process) bool {
-	err := process.Signal(os.Signal(syscall.Signal(0)))
+	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(process.Pid))
 	if err != nil {
 		return false
 	}
-	return true
+	defer windows.CloseHandle(handle)
+
+	var exitCode uint32
+	if err := windows.GetExitCodeProcess(handle, &exitCode); err != nil {
+		return false
+	}
+
+	return exitCode == 259
 }
 
 // killProcessOS kills a process using OS-specific method
