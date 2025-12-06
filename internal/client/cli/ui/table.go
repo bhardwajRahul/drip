@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"runtime"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -68,16 +69,20 @@ func (t *Table) Render() string {
 	// Header
 	headerParts := make([]string, len(t.headers))
 	for i, header := range t.headers {
-		style := tableHeaderStyle.Width(colWidths[i])
-		headerParts[i] = style.Render(header)
+		styled := tableHeaderStyle.Render(header)
+		headerParts[i] = padRight(styled, colWidths[i])
 	}
 	output.WriteString(strings.Join(headerParts, "  "))
 	output.WriteString("\n")
 
 	// Separator line
+	separatorChar := "─"
+	if runtime.GOOS == "windows" {
+		separatorChar = "-"
+	}
 	separatorParts := make([]string, len(t.headers))
 	for i := range t.headers {
-		separatorParts[i] = mutedStyle.Render(strings.Repeat("─", colWidths[i]))
+		separatorParts[i] = mutedStyle.Render(strings.Repeat(separatorChar, colWidths[i]))
 	}
 	output.WriteString(strings.Join(separatorParts, "  "))
 	output.WriteString("\n")
@@ -87,8 +92,7 @@ func (t *Table) Render() string {
 		rowParts := make([]string, len(t.headers))
 		for i, cell := range row {
 			if i < len(colWidths) {
-				style := tableCellStyle.Width(colWidths[i])
-				rowParts[i] = style.Render(cell)
+				rowParts[i] = padRight(cell, colWidths[i])
 			}
 		}
 		output.WriteString(strings.Join(rowParts, "  "))
@@ -99,6 +103,16 @@ func (t *Table) Render() string {
 	return output.String()
 }
 
+// padRight pads
+func padRight(text string, targetWidth int) string {
+	visibleWidth := lipgloss.Width(text)
+	if visibleWidth >= targetWidth {
+		return text
+	}
+	padding := strings.Repeat(" ", targetWidth-visibleWidth)
+	return text + padding
+}
+
 // Print prints the table
 func (t *Table) Print() {
 	fmt.Print(t.Render())
@@ -106,9 +120,13 @@ func (t *Table) Print() {
 
 // RenderList renders a simple list with bullet points
 func RenderList(items []string) string {
+	bullet := "•"
+	if runtime.GOOS == "windows" {
+		bullet = "*"
+	}
 	var output strings.Builder
 	for _, item := range items {
-		output.WriteString(mutedStyle.Render("  • "))
+		output.WriteString(mutedStyle.Render("  " + bullet + " "))
 		output.WriteString(item)
 		output.WriteString("\n")
 	}

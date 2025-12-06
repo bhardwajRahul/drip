@@ -67,14 +67,10 @@ var (
 	valueStyle = lipgloss.NewStyle().
 			Bold(true)
 
-	// Table styles
+	// Table styles (padding handled manually for consistent Windows output)
 	tableHeaderStyle = lipgloss.NewStyle().
 				Foreground(mutedColor).
-				Bold(true).
-				PaddingRight(2)
-
-	tableCellStyle = lipgloss.NewStyle().
-			PaddingRight(2)
+				Bold(true)
 )
 
 // Success returns a styled success message
