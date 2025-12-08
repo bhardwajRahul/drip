@@ -312,7 +312,9 @@ func (h *Handler) streamLargeRequest(w http.ResponseWriter, r *http.Request, tra
 		}
 	}
 
-	buffer := make([]byte, 32*1024)
+	streamBufPtr := h.bufferPool.GetMedium()
+	defer h.bufferPool.PutMedium(streamBufPtr)
+	buffer := (*streamBufPtr)[:pool.MediumBufferSize]
 	for {
 		n, readErr := r.Body.Read(buffer)
 		if n > 0 {

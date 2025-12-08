@@ -354,7 +354,9 @@ func (h *FrameHandler) adaptiveHTTPResponse(streamID, requestID string, resp *ht
 
 	// Buffer for initial read
 	buffer := make([]byte, 0, threshold)
-	tempBuf := make([]byte, 32*1024) // 32KB read chunks
+	tempBufPtr := h.bufferPool.Get(pool.SizeMedium)
+	defer h.bufferPool.Put(tempBufPtr)
+	tempBuf := (*tempBufPtr)[:pool.SizeMedium]
 
 	var totalRead int64
 	var hitThreshold bool
