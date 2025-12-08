@@ -41,6 +41,17 @@ func NewHandler(manager *tunnel.Manager, logger *zap.Logger, responses *Response
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Always handle /health and /stats directly, regardless of subdomain
+	if r.URL.Path == "/health" {
+		h.serveHealth(w, r)
+		return
+	}
+
+	if r.URL.Path == "/stats" {
+		h.serveStats(w, r)
+		return
+	}
+
 	subdomain := h.extractSubdomain(r.Host)
 
 	if subdomain == "" {
@@ -523,16 +534,6 @@ func (h *Handler) extractSubdomain(host string) string {
 }
 
 func (h *Handler) serveHomePage(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path == "/health" {
-		h.serveHealth(w, r)
-		return
-	}
-
-	if r.URL.Path == "/stats" {
-		h.serveStats(w, r)
-		return
-	}
-
 	html := `<!DOCTYPE html>
 <html>
 <head>
