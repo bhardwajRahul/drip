@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"drip/internal/client/cli/ui"
+	"drip/internal/shared/ui"
 	"github.com/spf13/cobra"
 )
 
@@ -24,6 +24,7 @@ var attachCmd = &cobra.Command{
 Examples:
   drip attach              List running tunnels and select one
   drip attach http 3000    Attach to HTTP tunnel on port 3000
+  drip attach https 8443   Attach to HTTPS tunnel on port 8443
   drip attach tcp 5432     Attach to TCP tunnel on port 5432
 
 Press Ctrl+C to detach (tunnel will continue running).`,
@@ -36,7 +37,7 @@ func init() {
 	rootCmd.AddCommand(attachCmd)
 }
 
-func runAttach(cmd *cobra.Command, args []string) error {
+func runAttach(_ *cobra.Command, args []string) error {
 	CleanupStaleDaemons()
 
 	daemons, err := ListAllDaemons()
@@ -59,8 +60,8 @@ func runAttach(cmd *cobra.Command, args []string) error {
 
 	if len(args) == 2 {
 		tunnelType := args[0]
-		if tunnelType != "http" && tunnelType != "tcp" {
-			return fmt.Errorf("invalid tunnel type: %s (must be 'http' or 'tcp')", tunnelType)
+		if tunnelType != "http" && tunnelType != "https" && tunnelType != "tcp" {
+			return fmt.Errorf("invalid tunnel type: %s (must be 'http', 'https', or 'tcp')", tunnelType)
 		}
 
 		port, err := strconv.Atoi(args[1])
@@ -119,10 +120,13 @@ func selectDaemonInteractive(daemons []*DaemonInfo) (*DaemonInfo, error) {
 		uptime := time.Since(d.StartTime)
 
 		var typeStr string
-		if d.Type == "http" {
-			typeStr = ui.Success("HTTP")
-		} else {
-			typeStr = ui.Highlight("TCP")
+		switch d.Type {
+		case "http":
+			typeStr = ui.Highlight("HTTP")
+		case "https":
+			typeStr = ui.Highlight("HTTPS")
+		default:
+			typeStr = ui.Cyan("TCP")
 		}
 
 		table.AddRow([]string{
@@ -196,7 +200,7 @@ func attachToDaemon(daemon *DaemonInfo) error {
 	select {
 	case <-sigCh:
 		if tailCmd.Process != nil {
-			tailCmd.Process.Kill()
+			_ = tailCmd.Process.Kill()
 		}
 		fmt.Println()
 		fmt.Println(ui.Warning("Detached from tunnel (tunnel is still running)"))

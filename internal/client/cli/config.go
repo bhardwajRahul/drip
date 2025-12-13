@@ -7,7 +7,7 @@ import (
 	"os"
 	"strings"
 
-	"drip/internal/client/cli/ui"
+	"drip/internal/shared/ui"
 	"drip/pkg/config"
 	"github.com/spf13/cobra"
 )
@@ -77,7 +77,7 @@ func init() {
 	rootCmd.AddCommand(configCmd)
 }
 
-func runConfigInit(cmd *cobra.Command, args []string) error {
+func runConfigInit(_ *cobra.Command, _ []string) error {
 	fmt.Print(ui.RenderConfigInit())
 
 	reader := bufio.NewReader(os.Stdin)
@@ -109,7 +109,7 @@ func runConfigInit(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func runConfigShow(cmd *cobra.Command, args []string) error {
+func runConfigShow(_ *cobra.Command, _ []string) error {
 	cfg, err := config.LoadClientConfig("")
 	if err != nil {
 		return err
@@ -137,7 +137,7 @@ func runConfigShow(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func runConfigSet(cmd *cobra.Command, args []string) error {
+func runConfigSet(_ *cobra.Command, _ []string) error {
 	cfg, err := config.LoadClientConfig("")
 	if err != nil {
 		cfg = &config.ClientConfig{
@@ -173,7 +173,7 @@ func runConfigSet(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func runConfigReset(cmd *cobra.Command, args []string) error {
+func runConfigReset(_ *cobra.Command, _ []string) error {
 	configPath := config.DefaultClientConfigPath()
 
 	if !config.ConfigExists("") {
@@ -202,7 +202,7 @@ func runConfigReset(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func runConfigValidate(cmd *cobra.Command, args []string) error {
+func runConfigValidate(_ *cobra.Command, _ []string) error {
 	cfg, err := config.LoadClientConfig("")
 	if err != nil {
 		fmt.Println(ui.Error("Failed to load configuration"))

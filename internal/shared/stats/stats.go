@@ -1,4 +1,4 @@
-package tcp
+package stats
 
 import (
 	"sync"
@@ -13,7 +13,8 @@ type TrafficStats struct {
 	totalBytesOut int64
 
 	// Request counts
-	totalRequests int64
+	totalRequests     int64
+	activeConnections int64
 
 	// For speed calculation
 	lastBytesIn  int64
@@ -53,6 +54,17 @@ func (s *TrafficStats) AddRequest() {
 	atomic.AddInt64(&s.totalRequests, 1)
 }
 
+func (s *TrafficStats) IncActiveConnections() {
+	atomic.AddInt64(&s.activeConnections, 1)
+}
+
+func (s *TrafficStats) DecActiveConnections() {
+	v := atomic.AddInt64(&s.activeConnections, -1)
+	if v < 0 {
+		atomic.StoreInt64(&s.activeConnections, 0)
+	}
+}
+
 // GetTotalBytesIn returns total incoming bytes
 func (s *TrafficStats) GetTotalBytesIn() int64 {
 	return atomic.LoadInt64(&s.totalBytesIn)
@@ -68,6 +80,10 @@ func (s *TrafficStats) GetTotalRequests() int64 {
 	return atomic.LoadInt64(&s.totalRequests)
 }
 
+func (s *TrafficStats) GetActiveConnections() int64 {
+	return atomic.LoadInt64(&s.activeConnections)
+}
+
 // GetTotalBytes returns total bytes (in + out)
 func (s *TrafficStats) GetTotalBytes() int64 {
 	return s.GetTotalBytesIn() + s.GetTotalBytesOut()
@@ -81,8 +97,10 @@ func (s *TrafficStats) UpdateSpeed() {
 
 	now := time.Now()
 	elapsed := now.Sub(s.lastTime).Seconds()
+
+	// Require minimum interval of 100ms to avoid division issues
 	if elapsed < 0.1 {
-		return // Avoid division by zero or too frequent updates
+		return
 	}
 
 	currentIn := atomic.LoadInt64(&s.totalBytesIn)
@@ -91,8 +109,20 @@ func (s *TrafficStats) UpdateSpeed() {
 	deltaIn := currentIn - s.lastBytesIn
 	deltaOut := currentOut - s.lastBytesOut
 
-	s.speedIn = int64(float64(deltaIn) / elapsed)
-	s.speedOut = int64(float64(deltaOut) / elapsed)
+	// Calculate instantaneous speed
+	if deltaIn > 0 {
+		s.speedIn = int64(float64(deltaIn) / elapsed)
+	} else {
+		// No new bytes - set speed to 0 immediately
+		s.speedIn = 0
+	}
+
+	if deltaOut > 0 {
+		s.speedOut = int64(float64(deltaOut) / elapsed)
+	} else {
+		// No new bytes - set speed to 0 immediately
+		s.speedOut = 0
+	}
 
 	s.lastBytesIn = currentIn
 	s.lastBytesOut = currentOut
@@ -119,18 +149,19 @@ func (s *TrafficStats) GetUptime() time.Duration {
 }
 
 // Snapshot returns a snapshot of all stats
-type StatsSnapshot struct {
-	TotalBytesIn  int64
-	TotalBytesOut int64
-	TotalBytes    int64
-	TotalRequests int64
-	SpeedIn       int64 // bytes per second
-	SpeedOut      int64 // bytes per second
-	Uptime        time.Duration
+type Snapshot struct {
+	TotalBytesIn      int64
+	TotalBytesOut     int64
+	TotalBytes        int64
+	TotalRequests     int64
+	ActiveConnections int64
+	SpeedIn           int64 // bytes per second
+	SpeedOut          int64 // bytes per second
+	Uptime            time.Duration
 }
 
 // GetSnapshot returns a snapshot of current stats
-func (s *TrafficStats) GetSnapshot() StatsSnapshot {
+func (s *TrafficStats) GetSnapshot() Snapshot {
 	s.speedMu.Lock()
 	speedIn := s.speedIn
 	speedOut := s.speedOut
@@ -138,90 +169,16 @@ func (s *TrafficStats) GetSnapshot() StatsSnapshot {
 
 	totalIn := atomic.LoadInt64(&s.totalBytesIn)
 	totalOut := atomic.LoadInt64(&s.totalBytesOut)
+	active := atomic.LoadInt64(&s.activeConnections)
 
-	return StatsSnapshot{
-		TotalBytesIn:  totalIn,
-		TotalBytesOut: totalOut,
-		TotalBytes:    totalIn + totalOut,
-		TotalRequests: atomic.LoadInt64(&s.totalRequests),
-		SpeedIn:       speedIn,
-		SpeedOut:      speedOut,
-		Uptime:        time.Since(s.startTime),
+	return Snapshot{
+		TotalBytesIn:      totalIn,
+		TotalBytesOut:     totalOut,
+		TotalBytes:        totalIn + totalOut,
+		TotalRequests:     atomic.LoadInt64(&s.totalRequests),
+		ActiveConnections: active,
+		SpeedIn:           speedIn,
+		SpeedOut:          speedOut,
+		Uptime:            time.Since(s.startTime),
 	}
-}
-
-// FormatBytes formats bytes to human readable string
-func FormatBytes(bytes int64) string {
-	const (
-		KB = 1024
-		MB = KB * 1024
-		GB = MB * 1024
-	)
-
-	switch {
-	case bytes >= GB:
-		return formatFloat(float64(bytes)/float64(GB)) + " GB"
-	case bytes >= MB:
-		return formatFloat(float64(bytes)/float64(MB)) + " MB"
-	case bytes >= KB:
-		return formatFloat(float64(bytes)/float64(KB)) + " KB"
-	default:
-		return formatInt(bytes) + " B"
-	}
-}
-
-// FormatSpeed formats speed (bytes per second) to human readable string
-func FormatSpeed(bytesPerSec int64) string {
-	if bytesPerSec == 0 {
-		return "0 B/s"
-	}
-	return FormatBytes(bytesPerSec) + "/s"
-}
-
-func formatFloat(f float64) string {
-	if f >= 100 {
-		return formatInt(int64(f))
-	} else if f >= 10 {
-		return formatOneDecimal(f)
-	}
-	return formatTwoDecimal(f)
-}
-
-func formatInt(i int64) string {
-	return intToStr(i)
-}
-
-func formatOneDecimal(f float64) string {
-	i := int64(f * 10)
-	whole := i / 10
-	frac := i % 10
-	return intToStr(whole) + "." + intToStr(frac)
-}
-
-func formatTwoDecimal(f float64) string {
-	i := int64(f * 100)
-	whole := i / 100
-	frac := i % 100
-	if frac < 10 {
-		return intToStr(whole) + ".0" + intToStr(frac)
-	}
-	return intToStr(whole) + "." + intToStr(frac)
-}
-
-func intToStr(i int64) string {
-	if i == 0 {
-		return "0"
-	}
-	if i < 0 {
-		return "-" + intToStr(-i)
-	}
-
-	var buf [20]byte
-	pos := len(buf)
-	for i > 0 {
-		pos--
-		buf[pos] = byte('0' + i%10)
-		i /= 10
-	}
-	return string(buf[pos:])
 }

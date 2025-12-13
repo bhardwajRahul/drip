@@ -1,20 +1,15 @@
 package tunnel
 
 import (
+	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"drip/internal/shared/protocol"
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
 )
-
-// Transport represents the control channel to the client.
-// It is implemented by the TCP control connection so the HTTP proxy
-// can push frames directly to the client without depending on WebSockets.
-type Transport interface {
-	SendFrame(frame *protocol.Frame) error
-}
 
 // Connection represents a tunnel connection from a client
 type Connection struct {
@@ -26,8 +21,12 @@ type Connection struct {
 	mu         sync.RWMutex
 	logger     *zap.Logger
 	closed     bool
-	transport  Transport
 	tunnelType protocol.TunnelType
+	openStream func() (net.Conn, error)
+
+	bytesIn           atomic.Int64
+	bytesOut          atomic.Int64
+	activeConnections atomic.Int64
 }
 
 // NewConnection creates a new tunnel connection
@@ -106,21 +105,6 @@ func (c *Connection) IsClosed() bool {
 	return c.closed
 }
 
-// SetTransport attaches the control transport and tunnel type.
-func (c *Connection) SetTransport(t Transport, tType protocol.TunnelType) {
-	c.mu.Lock()
-	c.transport = t
-	c.tunnelType = tType
-	c.mu.Unlock()
-}
-
-// GetTransport returns the attached transport (if any).
-func (c *Connection) GetTransport() Transport {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.transport
-}
-
 // SetTunnelType sets the tunnel type.
 func (c *Connection) SetTunnelType(tType protocol.TunnelType) {
 	c.mu.Lock()
@@ -133,6 +117,63 @@ func (c *Connection) GetTunnelType() protocol.TunnelType {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.tunnelType
+}
+
+// SetOpenStream registers a yamux stream opener for this tunnel.
+// It is used by the HTTP proxy to forward each request over a mux stream.
+func (c *Connection) SetOpenStream(open func() (net.Conn, error)) {
+	c.mu.Lock()
+	c.openStream = open
+	c.mu.Unlock()
+}
+
+// OpenStream opens a new mux stream to the tunnel client.
+func (c *Connection) OpenStream() (net.Conn, error) {
+	c.mu.RLock()
+	open := c.openStream
+	closed := c.closed
+	c.mu.RUnlock()
+
+	if closed || open == nil {
+		return nil, ErrConnectionClosed
+	}
+	return open()
+}
+
+func (c *Connection) AddBytesIn(n int64) {
+	if n <= 0 {
+		return
+	}
+	c.bytesIn.Add(n)
+}
+
+func (c *Connection) AddBytesOut(n int64) {
+	if n <= 0 {
+		return
+	}
+	c.bytesOut.Add(n)
+}
+
+func (c *Connection) GetBytesIn() int64 {
+	return c.bytesIn.Load()
+}
+
+func (c *Connection) GetBytesOut() int64 {
+	return c.bytesOut.Load()
+}
+
+func (c *Connection) IncActiveConnections() {
+	c.activeConnections.Add(1)
+}
+
+func (c *Connection) DecActiveConnections() {
+	if v := c.activeConnections.Add(-1); v < 0 {
+		c.activeConnections.Store(0)
+	}
+}
+
+func (c *Connection) GetActiveConnections() int64 {
+	return c.activeConnections.Load()
 }
 
 // StartWritePump starts the write pump for sending messages

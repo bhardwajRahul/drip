@@ -93,6 +93,11 @@ func RenderTunnelStats(status *TunnelStatus) string {
 
 	_, _, accent := tunnelVisuals(status.Type)
 
+	requestLabel := "Requests"
+	if status.Type == "tcp" {
+		requestLabel = "Connections"
+	}
+
 	header := lipgloss.JoinHorizontal(
 		lipgloss.Left,
 		lipgloss.NewStyle().Foreground(accent).Render("◉"),
@@ -102,7 +107,7 @@ func RenderTunnelStats(status *TunnelStatus) string {
 	row1 := lipgloss.JoinHorizontal(
 		lipgloss.Top,
 		statColumn("Latency", latencyStr, statsColumnWidth),
-		statColumn("Requests", highlightStyle.Render(requestsStr), statsColumnWidth),
+		statColumn(requestLabel, highlightStyle.Render(requestsStr), statsColumnWidth),
 	)
 
 	row2 := lipgloss.JoinHorizontal(

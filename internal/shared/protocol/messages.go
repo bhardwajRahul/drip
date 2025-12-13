@@ -2,12 +2,23 @@ package protocol
 
 import json "github.com/goccy/go-json"
 
+// PoolCapabilities advertises client connection pool capabilities
+type PoolCapabilities struct {
+	MaxDataConns int `json:"max_data_conns"` // Maximum data connections client supports
+	Version      int `json:"version"`        // Protocol version for pool features
+}
+
 // RegisterRequest is sent by client to register a tunnel
 type RegisterRequest struct {
 	Token           string     `json:"token"`            // Authentication token
 	CustomSubdomain string     `json:"custom_subdomain"` // Optional custom subdomain
 	TunnelType      TunnelType `json:"tunnel_type"`      // http, tcp, udp
 	LocalPort       int        `json:"local_port"`       // Local port to forward to
+
+	// Connection pool fields (optional, for multi-connection support)
+	ConnectionType   string            `json:"connection_type,omitempty"`   // "primary" or empty for legacy
+	TunnelID         string            `json:"tunnel_id,omitempty"`         // For data connections to join
+	PoolCapabilities *PoolCapabilities `json:"pool_capabilities,omitempty"` // Client pool capabilities
 }
 
 // RegisterResponse is sent by server after successful registration
@@ -16,6 +27,25 @@ type RegisterResponse struct {
 	Port      int    `json:"port,omitempty"`   // Assigned TCP port (for TCP tunnels)
 	URL       string `json:"url"`              // Full tunnel URL
 	Message   string `json:"message"`          // Success message
+
+	// Connection pool fields (optional, for multi-connection support)
+	TunnelID         string `json:"tunnel_id,omitempty"`          // Unique tunnel identifier
+	SupportsDataConn bool   `json:"supports_data_conn,omitempty"` // Server supports multi-connection
+	RecommendedConns int    `json:"recommended_conns,omitempty"`  // Suggested data connection count
+}
+
+// DataConnectRequest is sent by data connections to join a tunnel
+type DataConnectRequest struct {
+	TunnelID     string `json:"tunnel_id"`     // Tunnel to join
+	Token        string `json:"token"`         // Same auth token as primary
+	ConnectionID string `json:"connection_id"` // Unique connection identifier
+}
+
+// DataConnectResponse acknowledges data connection
+type DataConnectResponse struct {
+	Accepted     bool   `json:"accepted"`              // Whether connection was accepted
+	ConnectionID string `json:"connection_id"`         // Echoed connection ID
+	Message      string `json:"message,omitempty"`     // Optional message
 }
 
 // ErrorMessage represents an error
@@ -23,9 +53,6 @@ type ErrorMessage struct {
 	Code    string `json:"code"`    // Error code
 	Message string `json:"message"` // Error message
 }
-
-// Note: DataHeader is now defined in binary_header.go as a pure binary structure
-// TCPData has been removed - use DataHeader + raw bytes directly
 
 // Marshal helpers for control plane messages (JSON encoding)
 func MarshalJSON(v interface{}) ([]byte, error) {

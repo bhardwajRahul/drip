@@ -28,7 +28,7 @@ func init() {
 	rootCmd.AddCommand(stopCmd)
 }
 
-func runStop(cmd *cobra.Command, args []string) error {
+func runStop(_ *cobra.Command, args []string) error {
 	if args[0] == "all" {
 		return stopAllDaemons()
 	}

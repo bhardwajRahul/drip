@@ -8,13 +8,17 @@ import (
 	"syscall"
 	"time"
 
-	"drip/internal/client/cli/ui"
 	"drip/internal/client/tcp"
+	"drip/internal/shared/ui"
 	"drip/internal/shared/utils"
 	"go.uber.org/zap"
 )
 
-// runTunnelWithUI runs a tunnel with the new UI
+const (
+	maxReconnectAttempts = 5
+	reconnectInterval    = 3 * time.Second
+)
+
 func runTunnelWithUI(connConfig *tcp.ConnectorConfig, daemonInfo *DaemonInfo) error {
 	if err := utils.InitLogger(verbose); err != nil {
 		return fmt.Errorf("failed to initialize logger: %w", err)
@@ -28,7 +32,7 @@ func runTunnelWithUI(connConfig *tcp.ConnectorConfig, daemonInfo *DaemonInfo) er
 
 	reconnectAttempts := 0
 	for {
-		connector := tcp.NewConnector(connConfig, logger)
+		connector := tcp.NewTunnelClient(connConfig, logger)
 
 		fmt.Println(ui.RenderConnecting(connConfig.ServerAddr, reconnectAttempts, maxReconnectAttempts))
 
@@ -87,8 +91,8 @@ func runTunnelWithUI(connConfig *tcp.ConnectorConfig, daemonInfo *DaemonInfo) er
 		disconnected := make(chan struct{})
 
 		go func() {
-			ticker := time.NewTicker(1 * time.Second)
-			defer ticker.Stop()
+			renderTicker := time.NewTicker(1 * time.Second)
+			defer renderTicker.Stop()
 
 			var lastLatency time.Duration
 			lastRenderedLines := 0
@@ -97,27 +101,38 @@ func runTunnelWithUI(connConfig *tcp.ConnectorConfig, daemonInfo *DaemonInfo) er
 				select {
 				case latency := <-latencyCh:
 					lastLatency = latency
-				case <-ticker.C:
+				case <-renderTicker.C:
 					stats := connector.GetStats()
-					if stats != nil {
-						stats.UpdateSpeed()
-						snapshot := stats.GetSnapshot()
-
-						status.Latency = lastLatency
-						status.BytesIn = snapshot.TotalBytesIn
-						status.BytesOut = snapshot.TotalBytesOut
-						status.SpeedIn = float64(snapshot.SpeedIn)
-						status.SpeedOut = float64(snapshot.SpeedOut)
-						status.TotalRequest = snapshot.TotalRequests
-
-						statsView := ui.RenderTunnelStats(status)
-						if lastRenderedLines > 0 {
-							fmt.Print(clearLines(lastRenderedLines))
-						}
-
-						fmt.Print(statsView)
-						lastRenderedLines = countRenderedLines(statsView)
+					if stats == nil {
+						continue
 					}
+
+					stats.UpdateSpeed()
+					snapshot := stats.GetSnapshot()
+
+					status.Latency = lastLatency
+					status.BytesIn = snapshot.TotalBytesIn
+					status.BytesOut = snapshot.TotalBytesOut
+					status.SpeedIn = float64(snapshot.SpeedIn)
+					status.SpeedOut = float64(snapshot.SpeedOut)
+
+					if status.Type == "tcp" {
+						if snapshot.SpeedIn == 0 && snapshot.SpeedOut == 0 {
+							status.TotalRequest = 0
+						} else {
+							status.TotalRequest = snapshot.ActiveConnections
+						}
+					} else {
+						status.TotalRequest = snapshot.TotalRequests
+					}
+
+					statsView := ui.RenderTunnelStats(status)
+					if lastRenderedLines > 0 {
+						fmt.Print(clearLines(lastRenderedLines))
+					}
+
+					fmt.Print(statsView)
+					lastRenderedLines = countRenderedLines(statsView)
 				case <-stopDisplay:
 					return
 				}

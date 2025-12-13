@@ -18,14 +18,14 @@ const (
 type FrameType byte
 
 const (
-	FrameTypeRegister     FrameType = 0x01
-	FrameTypeRegisterAck  FrameType = 0x02
-	FrameTypeHeartbeat    FrameType = 0x03
-	FrameTypeHeartbeatAck FrameType = 0x04
-	FrameTypeData         FrameType = 0x05
-	FrameTypeClose        FrameType = 0x06
-	FrameTypeError        FrameType = 0x07
-	FrameTypeFlowControl  FrameType = 0x08
+	FrameTypeRegister       FrameType = 0x01
+	FrameTypeRegisterAck    FrameType = 0x02
+	FrameTypeHeartbeat      FrameType = 0x03
+	FrameTypeHeartbeatAck   FrameType = 0x04
+	FrameTypeClose          FrameType = 0x05
+	FrameTypeError          FrameType = 0x06
+	FrameTypeDataConnect    FrameType = 0x07
+	FrameTypeDataConnectAck FrameType = 0x08
 )
 
 // String returns the string representation of frame type
@@ -39,14 +39,14 @@ func (t FrameType) String() string {
 		return "Heartbeat"
 	case FrameTypeHeartbeatAck:
 		return "HeartbeatAck"
-	case FrameTypeData:
-		return "Data"
 	case FrameTypeClose:
 		return "Close"
 	case FrameTypeError:
 		return "Error"
-	case FrameTypeFlowControl:
-		return "FlowControl"
+	case FrameTypeDataConnect:
+		return "DataConnect"
+	case FrameTypeDataConnectAck:
+		return "DataConnectAck"
 	default:
 		return fmt.Sprintf("Unknown(%d)", t)
 	}
@@ -56,6 +56,9 @@ type Frame struct {
 	Type       FrameType
 	Payload    []byte
 	poolBuffer *[]byte
+	// queuedBytes is set by FrameWriter when the frame is enqueued.
+	// It allows the writer to decrement backlog counters exactly once.
+	queuedBytes int64
 }
 
 func WriteFrame(w io.Writer, frame *Frame) error {
@@ -130,6 +133,8 @@ func (f *Frame) Release() {
 		f.poolBuffer = nil
 		f.Payload = nil
 	}
+	// Reset queued marker to avoid carrying over stale state if the frame is reused.
+	f.queuedBytes = 0
 }
 
 // NewFrame creates a new frame

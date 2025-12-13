@@ -12,32 +12,34 @@ import (
 	"drip/internal/server/tunnel"
 	"drip/internal/shared/pool"
 	"drip/internal/shared/recovery"
+
 	"go.uber.org/zap"
 )
 
 // Listener handles TCP connections with TLS 1.3
 type Listener struct {
-	address       string
-	tlsConfig     *tls.Config
-	authToken     string
-	manager       *tunnel.Manager
-	portAlloc     *PortAllocator
-	logger        *zap.Logger
-	domain        string
-	publicPort    int
-	httpHandler   http.Handler
-	responseChans HTTPResponseHandler
-	listener      net.Listener
-	stopCh        chan struct{}
-	wg            sync.WaitGroup
-	connections   map[string]*Connection
-	connMu        sync.RWMutex
-	workerPool    *pool.WorkerPool // Worker pool for connection handling
-	recoverer     *recovery.Recoverer
+	address     string
+	tlsConfig   *tls.Config
+	authToken   string
+	manager     *tunnel.Manager
+	portAlloc   *PortAllocator
+	logger      *zap.Logger
+	domain      string
+	publicPort  int
+	httpHandler http.Handler
+	listener    net.Listener
+	stopCh      chan struct{}
+	wg          sync.WaitGroup
+	connections map[string]*Connection
+	connMu      sync.RWMutex
+	workerPool  *pool.WorkerPool // Worker pool for connection handling
+	recoverer   *recovery.Recoverer
 	panicMetrics  *recovery.PanicMetrics
+
+	groupManager *ConnectionGroupManager
 }
 
-func NewListener(address string, tlsConfig *tls.Config, authToken string, manager *tunnel.Manager, logger *zap.Logger, portAlloc *PortAllocator, domain string, publicPort int, httpHandler http.Handler, responseChans HTTPResponseHandler) *Listener {
+func NewListener(address string, tlsConfig *tls.Config, authToken string, manager *tunnel.Manager, logger *zap.Logger, portAlloc *PortAllocator, domain string, publicPort int, httpHandler http.Handler) *Listener {
 	numCPU := pool.NumCPU()
 	workers := numCPU * 5
 	queueSize := workers * 20
@@ -53,21 +55,21 @@ func NewListener(address string, tlsConfig *tls.Config, authToken string, manage
 	recoverer := recovery.NewRecoverer(logger, panicMetrics)
 
 	return &Listener{
-		address:       address,
-		tlsConfig:     tlsConfig,
-		authToken:     authToken,
-		manager:       manager,
-		portAlloc:     portAlloc,
-		logger:        logger,
-		domain:        domain,
-		publicPort:    publicPort,
-		httpHandler:   httpHandler,
-		responseChans: responseChans,
-		stopCh:        make(chan struct{}),
-		connections:   make(map[string]*Connection),
-		workerPool:    workerPool,
-		recoverer:     recoverer,
-		panicMetrics:  panicMetrics,
+		address:      address,
+		tlsConfig:    tlsConfig,
+		authToken:    authToken,
+		manager:      manager,
+		portAlloc:    portAlloc,
+		logger:       logger,
+		domain:       domain,
+		publicPort:   publicPort,
+		httpHandler:  httpHandler,
+		stopCh:       make(chan struct{}),
+		connections:  make(map[string]*Connection),
+		workerPool:   workerPool,
+		recoverer:    recoverer,
+		panicMetrics: panicMetrics,
+		groupManager: NewConnectionGroupManager(logger),
 	}
 }
 
@@ -206,7 +208,7 @@ func (l *Listener) handleConnection(netConn net.Conn) {
 		return
 	}
 
-	conn := NewConnection(netConn, l.authToken, l.manager, l.logger, l.portAlloc, l.domain, l.publicPort, l.httpHandler, l.responseChans)
+	conn := NewConnection(netConn, l.authToken, l.manager, l.logger, l.portAlloc, l.domain, l.publicPort, l.httpHandler, l.groupManager)
 
 	connID := netConn.RemoteAddr().String()
 	l.connMu.Lock()
@@ -222,14 +224,11 @@ func (l *Listener) handleConnection(netConn net.Conn) {
 	if err := conn.Handle(); err != nil {
 		errStr := err.Error()
 
-		// Client disconnection errors - normal network behavior, log as DEBUG
-		if strings.Contains(errStr, "connection reset by peer") ||
+		// Client disconnection errors - normal network behavior, ignore
+		if strings.Contains(errStr, "EOF") ||
+			strings.Contains(errStr, "connection reset by peer") ||
 			strings.Contains(errStr, "broken pipe") ||
 			strings.Contains(errStr, "connection refused") {
-			l.logger.Debug("Client disconnected",
-				zap.String("remote_addr", connID),
-				zap.Error(err),
-			)
 			return
 		}
 
@@ -275,6 +274,10 @@ func (l *Listener) Stop() error {
 
 	if l.workerPool != nil {
 		l.workerPool.Close()
+	}
+
+	if l.groupManager != nil {
+		l.groupManager.Close()
 	}
 
 	l.logger.Info("TCP listener stopped")

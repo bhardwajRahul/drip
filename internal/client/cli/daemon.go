@@ -5,10 +5,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"time"
 
-	"drip/internal/client/cli/ui"
+	"drip/internal/shared/ui"
 	json "github.com/goccy/go-json"
 )
 
@@ -194,8 +193,8 @@ func StartDaemon(tunnelType string, port int, args []string) error {
 		return fmt.Errorf("failed to start daemon: %w", err)
 	}
 
-	// Don't wait for the process - let it run in background
-	// The child process will save its own daemon info after connecting
+	_ = logFile.Close()
+	_ = devNull.Close()
 
 	fmt.Println(ui.RenderDaemonStarted(tunnelType, port, cmd.Process.Pid, logPath))
 
@@ -220,28 +219,16 @@ func CleanupStaleDaemons() error {
 
 // FormatDuration formats a duration in a human-readable way
 func FormatDuration(d time.Duration) string {
-	if d < time.Minute {
+	switch {
+	case d < time.Minute:
 		return fmt.Sprintf("%ds", int(d.Seconds()))
-	} else if d < time.Hour {
+	case d < time.Hour:
 		return fmt.Sprintf("%dm %ds", int(d.Minutes()), int(d.Seconds())%60)
-	} else if d < 24*time.Hour {
+	case d < 24*time.Hour:
 		return fmt.Sprintf("%dh %dm", int(d.Hours()), int(d.Minutes())%60)
 	}
+
 	days := int(d.Hours()) / 24
 	hours := int(d.Hours()) % 24
 	return fmt.Sprintf("%dd %dh", days, hours)
-}
-
-// ParsePortFromArgs extracts the port number from command arguments
-func ParsePortFromArgs(args []string) (int, error) {
-	for _, arg := range args {
-		if len(arg) > 0 && arg[0] == '-' {
-			continue
-		}
-		port, err := strconv.Atoi(arg)
-		if err == nil && port > 0 && port <= 65535 {
-			return port, nil
-		}
-	}
-	return 0, fmt.Errorf("port number not found in arguments")
 }

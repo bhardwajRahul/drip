@@ -13,6 +13,7 @@ import (
 	"time"
 
 	json "github.com/goccy/go-json"
+	"github.com/hashicorp/yamux"
 
 	"drip/internal/server/tunnel"
 	"drip/internal/shared/constants"
@@ -33,36 +34,27 @@ type Connection struct {
 	publicPort    int
 	portAlloc     *PortAllocator
 	tunnelConn    *tunnel.Connection
-	proxy         *TunnelProxy
 	stopCh        chan struct{}
 	once          sync.Once
 	lastHeartbeat time.Time
 	mu            sync.RWMutex
 	frameWriter   *protocol.FrameWriter
 	httpHandler   http.Handler
-	responseChans HTTPResponseHandler
 	tunnelType    protocol.TunnelType // Track tunnel type
 	ctx           context.Context
 	cancel        context.CancelFunc
 
-	// Flow control
-	paused    bool
-	pauseCond *sync.Cond
-}
+	// gost-like TCP tunnel (yamux)
+	session *yamux.Session
+	proxy   *Proxy
 
-// HTTPResponseHandler interface for response channel operations
-type HTTPResponseHandler interface {
-	CreateResponseChan(requestID string) chan *protocol.HTTPResponse
-	GetResponseChan(requestID string) <-chan *protocol.HTTPResponse
-	CleanupResponseChan(requestID string)
-	SendResponse(requestID string, resp *protocol.HTTPResponse)
-	// Streaming response methods
-	SendStreamingHead(requestID string, head *protocol.HTTPResponseHead) error
-	SendStreamingChunk(requestID string, chunk []byte, isLast bool) error
+	// Multi-connection support
+	tunnelID     string
+	groupManager *ConnectionGroupManager
 }
 
 // NewConnection creates a new connection handler
-func NewConnection(conn net.Conn, authToken string, manager *tunnel.Manager, logger *zap.Logger, portAlloc *PortAllocator, domain string, publicPort int, httpHandler http.Handler, responseChans HTTPResponseHandler) *Connection {
+func NewConnection(conn net.Conn, authToken string, manager *tunnel.Manager, logger *zap.Logger, portAlloc *PortAllocator, domain string, publicPort int, httpHandler http.Handler, groupManager *ConnectionGroupManager) *Connection {
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &Connection{
 		conn:          conn,
@@ -73,13 +65,12 @@ func NewConnection(conn net.Conn, authToken string, manager *tunnel.Manager, log
 		domain:        domain,
 		publicPort:    publicPort,
 		httpHandler:   httpHandler,
-		responseChans: responseChans,
 		stopCh:        make(chan struct{}),
 		lastHeartbeat: time.Now(),
 		ctx:           ctx,
 		cancel:        cancel,
+		groupManager:  groupManager,
 	}
-	c.pauseCond = sync.NewCond(&c.mu)
 	return c
 }
 
@@ -97,8 +88,8 @@ func (c *Connection) Handle() error {
 	// Use buffered reader to support peeking
 	reader := bufio.NewReader(c.conn)
 
-	// Peek first 8 bytes to detect protocol
-	peek, err := reader.Peek(8)
+	// Peek first 4 bytes to detect protocol (HTTP methods are 4 bytes).
+	peek, err := reader.Peek(4)
 	if err != nil {
 		return fmt.Errorf("failed to peek connection: %w", err)
 	}
@@ -126,6 +117,11 @@ func (c *Connection) Handle() error {
 	}
 	sf := protocol.WithFrame(frame)
 	defer sf.Close()
+
+	// Handle data connection request (for multi-connection pool)
+	if sf.Frame.Type == protocol.FrameTypeDataConnect {
+		return c.handleDataConnect(sf.Frame, reader)
+	}
 
 	if sf.Frame.Type != protocol.FrameTypeRegister {
 		return fmt.Errorf("expected register frame, got %s", sf.Frame.Type)
@@ -180,7 +176,6 @@ func (c *Connection) Handle() error {
 
 	// Store TCP connection reference and metadata for HTTP proxy routing
 	c.tunnelConn.Conn = nil // We're using TCP, not WebSocket
-	c.tunnelConn.SetTransport(c, req.TunnelType)
 	c.tunnelConn.SetTunnelType(req.TunnelType)
 	c.tunnelType = req.TunnelType
 
@@ -208,11 +203,33 @@ func (c *Connection) Handle() error {
 		tunnelURL = fmt.Sprintf("tcp://%s:%d", c.domain, c.port)
 	}
 
+	// Generate TunnelID for multi-connection support if client supports it
+	var tunnelID string
+	var supportsDataConn bool
+	recommendedConns := 0
+
+	if req.PoolCapabilities != nil && req.ConnectionType == "primary" && c.groupManager != nil {
+		// Client supports connection pooling
+		group := c.groupManager.CreateGroup(subdomain, req.Token, c, req.TunnelType)
+		tunnelID = group.TunnelID
+		c.tunnelID = tunnelID
+		supportsDataConn = true
+		recommendedConns = 4 // Recommend 4 data connections
+
+		c.logger.Info("Created connection group for multi-connection support",
+			zap.String("tunnel_id", tunnelID),
+			zap.Int("max_data_conns", req.PoolCapabilities.MaxDataConns),
+		)
+	}
+
 	resp := protocol.RegisterResponse{
-		Subdomain: subdomain,
-		Port:      c.port,
-		URL:       tunnelURL,
-		Message:   "Tunnel registered successfully",
+		Subdomain:        subdomain,
+		Port:             c.port,
+		URL:              tunnelURL,
+		Message:          "Tunnel registered successfully",
+		TunnelID:         tunnelID,
+		SupportsDataConn: supportsDataConn,
+		RecommendedConns: recommendedConns,
 	}
 
 	respData, _ := json.Marshal(resp)
@@ -224,21 +241,23 @@ func (c *Connection) Handle() error {
 		return fmt.Errorf("failed to send registration ack: %w", err)
 	}
 
+	// Clear deadline for tunnel data-plane.
+	c.conn.SetReadDeadline(time.Time{})
+
+	// gost-like tunnels: switch to yamux after RegisterAck.
+	if req.TunnelType == protocol.TunnelTypeTCP {
+		return c.handleTCPTunnel(reader)
+	}
+	if req.TunnelType == protocol.TunnelTypeHTTP || req.TunnelType == protocol.TunnelTypeHTTPS {
+		return c.handleHTTPProxyTunnel(reader)
+	}
+
 	c.frameWriter = protocol.NewFrameWriter(c.conn)
 
 	c.frameWriter.SetWriteErrorHandler(func(err error) {
 		c.logger.Error("Write error detected, closing connection", zap.Error(err))
 		c.Close()
 	})
-
-	c.conn.SetReadDeadline(time.Time{})
-
-	if req.TunnelType == protocol.TunnelTypeTCP {
-		c.proxy = NewTunnelProxy(c.port, subdomain, c.conn, c.logger)
-		if err := c.proxy.Start(); err != nil {
-			return fmt.Errorf("failed to start TCP proxy: %w", err)
-		}
-	}
 
 	go c.heartbeatChecker()
 
@@ -376,7 +395,7 @@ func (c *Connection) handleFrames(reader *bufio.Reader) error {
 		c.conn.SetReadDeadline(time.Now().Add(constants.RequestTimeout))
 		frame, err := protocol.ReadFrame(reader)
 		if err != nil {
-			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			if isTimeoutError(err) {
 				c.logger.Warn("Read timeout, connection may be dead")
 				return fmt.Errorf("read timeout")
 			}
@@ -404,15 +423,6 @@ func (c *Connection) handleFrames(reader *bufio.Reader) error {
 			c.handleHeartbeat()
 			sf.Close()
 
-		case protocol.FrameTypeData:
-			// Data frame from client (response to forwarded request)
-			c.handleDataFrame(sf.Frame)
-			sf.Close()
-
-		case protocol.FrameTypeFlowControl:
-			c.handleFlowControl(sf.Frame)
-			sf.Close()
-
 		case protocol.FrameTypeClose:
 			sf.Close()
 			c.logger.Info("Client requested close")
@@ -436,124 +446,9 @@ func (c *Connection) handleHeartbeat() {
 	// Send heartbeat ack
 	ackFrame := protocol.NewFrame(protocol.FrameTypeHeartbeatAck, nil)
 
-	err := c.frameWriter.WriteFrame(ackFrame)
+	err := c.frameWriter.WriteControl(ackFrame)
 	if err != nil {
 		c.logger.Error("Failed to send heartbeat ack", zap.Error(err))
-	}
-}
-
-// handleDataFrame handles data frame (response from client)
-func (c *Connection) handleDataFrame(frame *protocol.Frame) {
-	// Decode payload (auto-detects protocol version)
-	header, data, err := protocol.DecodeDataPayload(frame.Payload)
-	if err != nil {
-		c.logger.Error("Failed to decode data payload",
-			zap.Error(err),
-		)
-		return
-	}
-
-	c.logger.Debug("Received data frame",
-		zap.String("stream_id", header.StreamID),
-		zap.String("type", header.Type.String()),
-		zap.Int("data_size", len(data)),
-	)
-
-	switch header.Type {
-	case protocol.DataTypeResponse:
-		// TCP tunnel response, forward to proxy
-		if c.proxy != nil {
-			if err := c.proxy.HandleResponse(header.StreamID, data); err != nil {
-				c.logger.Error("Failed to handle response",
-					zap.String("stream_id", header.StreamID),
-					zap.Error(err),
-				)
-			}
-		}
-	case protocol.DataTypeHTTPResponse:
-		if c.responseChans == nil {
-			c.logger.Warn("No response channel handler for HTTP response",
-				zap.String("stream_id", header.StreamID),
-			)
-			return
-		}
-
-		// Decode HTTP response (auto-detects JSON vs msgpack)
-		httpResp, err := protocol.DecodeHTTPResponse(data)
-		if err != nil {
-			c.logger.Error("Failed to decode HTTP response",
-				zap.String("stream_id", header.StreamID),
-				zap.Error(err),
-			)
-			return
-		}
-
-		// Route by request ID when provided to keep request/response aligned.
-		reqID := header.RequestID
-		if reqID == "" {
-			reqID = header.StreamID
-		}
-
-		c.responseChans.SendResponse(reqID, httpResp)
-	case protocol.DataTypeHTTPHead:
-		// Streaming HTTP response headers
-		if c.responseChans == nil {
-			c.logger.Warn("No response handler for streaming HTTP head",
-				zap.String("stream_id", header.StreamID),
-			)
-			return
-		}
-
-		httpHead, err := protocol.DecodeHTTPResponseHead(data)
-		if err != nil {
-			c.logger.Error("Failed to decode HTTP response head",
-				zap.String("stream_id", header.StreamID),
-				zap.Error(err),
-			)
-			return
-		}
-
-		reqID := header.RequestID
-		if reqID == "" {
-			reqID = header.StreamID
-		}
-
-		if err := c.responseChans.SendStreamingHead(reqID, httpHead); err != nil {
-			c.logger.Error("Failed to send streaming head",
-				zap.String("request_id", reqID),
-				zap.Error(err),
-			)
-		}
-	case protocol.DataTypeHTTPBodyChunk:
-		// Streaming HTTP response body chunk
-		if c.responseChans == nil {
-			c.logger.Warn("No response handler for streaming HTTP chunk",
-				zap.String("stream_id", header.StreamID),
-			)
-			return
-		}
-
-		reqID := header.RequestID
-		if reqID == "" {
-			reqID = header.StreamID
-		}
-
-		if err := c.responseChans.SendStreamingChunk(reqID, data, header.IsLast); err != nil {
-			c.logger.Error("Failed to send streaming chunk",
-				zap.String("request_id", reqID),
-				zap.Error(err),
-			)
-		}
-	case protocol.DataTypeClose:
-		// Client is closing the stream
-		if c.proxy != nil {
-			c.proxy.CloseStream(header.StreamID)
-		}
-	default:
-		c.logger.Warn("Unknown data frame type",
-			zap.String("type", header.Type.String()),
-			zap.String("stream_id", header.StreamID),
-		)
 	}
 }
 
@@ -583,16 +478,6 @@ func (c *Connection) heartbeatChecker() {
 	}
 }
 
-func (c *Connection) SendFrame(frame *protocol.Frame) error {
-	if c.frameWriter == nil {
-		return protocol.WriteFrame(c.conn, frame)
-	}
-	if frame.Type == protocol.FrameTypeData {
-		return c.sendWithBackpressure(frame)
-	}
-	return c.frameWriter.WriteFrame(frame)
-}
-
 func (c *Connection) sendError(code, message string) {
 	errMsg := protocol.ErrorMessage{
 		Code:    code,
@@ -618,8 +503,12 @@ func (c *Connection) Close() {
 			c.cancel()
 		}
 
+		// Ensure any in-flight writes return quickly on shutdown to avoid hanging.
+		if c.conn != nil {
+			_ = c.conn.SetDeadline(time.Now())
+		}
+
 		if c.frameWriter != nil {
-			c.frameWriter.Flush()
 			c.frameWriter.Close()
 		}
 
@@ -627,7 +516,13 @@ func (c *Connection) Close() {
 			c.proxy.Stop()
 		}
 
-		c.conn.Close()
+		if c.session != nil {
+			_ = c.session.Close()
+		}
+
+		if c.conn != nil {
+			c.conn.Close()
+		}
 
 		if c.port > 0 && c.portAlloc != nil {
 			c.portAlloc.Release(c.port)
@@ -635,17 +530,18 @@ func (c *Connection) Close() {
 
 		if c.subdomain != "" {
 			c.manager.Unregister(c.subdomain)
+
+			// Clean up connection group when PRIMARY connection closes
+			// (only primary connections have subdomain set)
+			if c.tunnelID != "" && c.groupManager != nil {
+				c.groupManager.RemoveGroup(c.tunnelID)
+			}
 		}
 
 		c.logger.Info("Connection closed",
 			zap.String("subdomain", c.subdomain),
 		)
 	})
-}
-
-// GetSubdomain returns the assigned subdomain
-func (c *Connection) GetSubdomain() string {
-	return c.subdomain
 }
 
 // httpResponseWriter implements http.ResponseWriter for writing to a net.Conn
@@ -698,39 +594,196 @@ func (w *httpResponseWriter) Write(data []byte) (int, error) {
 	return w.writer.Write(data)
 }
 
-func (c *Connection) handleFlowControl(frame *protocol.Frame) {
-	msg, err := protocol.DecodeFlowControlMessage(frame.Payload)
-	if err != nil {
-		c.logger.Error("Failed to decode flow control", zap.Error(err))
-		return
+// handleDataConnect handles a data connection join request
+func (c *Connection) handleDataConnect(frame *protocol.Frame, reader *bufio.Reader) error {
+	var req protocol.DataConnectRequest
+	if err := json.Unmarshal(frame.Payload, &req); err != nil {
+		c.sendError("invalid_request", "Failed to parse data connect request")
+		return fmt.Errorf("failed to parse data connect request: %w", err)
 	}
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.logger.Info("Data connection request received",
+		zap.String("tunnel_id", req.TunnelID),
+		zap.String("connection_id", req.ConnectionID),
+	)
 
-	switch msg.Action {
-	case protocol.FlowControlPause:
-		c.paused = true
-		c.logger.Warn("Client requested pause",
-			zap.String("stream", msg.StreamID))
+	// Validate the request
+	if c.groupManager == nil {
+		c.sendDataConnectError("not_supported", "Multi-connection not supported")
+		return fmt.Errorf("group manager not available")
+	}
 
-	case protocol.FlowControlResume:
-		c.paused = false
-		c.pauseCond.Broadcast()
-		c.logger.Info("Client requested resume",
-			zap.String("stream", msg.StreamID))
+	// Validate auth token
+	if c.authToken != "" && req.Token != c.authToken {
+		c.sendDataConnectError("authentication_failed", "Invalid authentication token")
+		return fmt.Errorf("authentication failed for data connection")
+	}
 
-	default:
-		c.logger.Warn("Unknown flow control action",
-			zap.String("action", string(msg.Action)))
+	group, ok := c.groupManager.GetGroup(req.TunnelID)
+	if !ok || group == nil {
+		c.sendDataConnectError("join_failed", "Tunnel not found")
+		return fmt.Errorf("tunnel not found: %s", req.TunnelID)
+	}
+
+	// Validate token against the primary registration token.
+	if group.Token != "" && req.Token != group.Token {
+		c.sendDataConnectError("authentication_failed", "Invalid authentication token")
+		return fmt.Errorf("authentication failed for data connection")
+	}
+
+	// Store tunnelID for cleanup
+	c.tunnelID = req.TunnelID
+
+	// For TCP tunnels, the data connection is upgraded to a yamux session and used for
+	// stream forwarding, not framed request/response routing.
+	if group.TunnelType == protocol.TunnelTypeTCP {
+		resp := protocol.DataConnectResponse{
+			Accepted:     true,
+			ConnectionID: req.ConnectionID,
+			Message:      "Data connection accepted",
+		}
+
+		respData, _ := json.Marshal(resp)
+		ackFrame := protocol.NewFrame(protocol.FrameTypeDataConnectAck, respData)
+
+		if err := protocol.WriteFrame(c.conn, ackFrame); err != nil {
+			return fmt.Errorf("failed to send data connect ack: %w", err)
+		}
+
+		c.logger.Info("TCP data connection established",
+			zap.String("tunnel_id", req.TunnelID),
+			zap.String("connection_id", req.ConnectionID),
+		)
+
+		// Clear deadline for yamux data-plane.
+		_ = c.conn.SetReadDeadline(time.Time{})
+
+		// Public server acts as yamux Client, client connector acts as yamux Server.
+		bc := &bufferedConn{
+			Conn:   c.conn,
+			reader: reader,
+		}
+
+		cfg := yamux.DefaultConfig()
+		cfg.EnableKeepAlive = false
+		cfg.LogOutput = io.Discard
+		cfg.AcceptBacklog = constants.YamuxAcceptBacklog
+
+		session, err := yamux.Client(bc, cfg)
+		if err != nil {
+			return fmt.Errorf("failed to init yamux session: %w", err)
+		}
+		c.session = session
+
+		group.AddSession(req.ConnectionID, session)
+		defer group.RemoveSession(req.ConnectionID)
+
+		select {
+		case <-c.stopCh:
+			return nil
+		case <-session.CloseChan():
+			return nil
+		}
+	}
+
+	// Add data connection to group
+	dataConn, err := c.groupManager.AddDataConnection(&req, c.conn)
+	if err != nil {
+		c.sendDataConnectError("join_failed", err.Error())
+		return fmt.Errorf("failed to join connection group: %w", err)
+	}
+
+	// Send success response
+	resp := protocol.DataConnectResponse{
+		Accepted:     true,
+		ConnectionID: req.ConnectionID,
+		Message:      "Data connection accepted",
+	}
+
+	respData, _ := json.Marshal(resp)
+	ackFrame := protocol.NewFrame(protocol.FrameTypeDataConnectAck, respData)
+
+	if err := protocol.WriteFrame(c.conn, ackFrame); err != nil {
+		return fmt.Errorf("failed to send data connect ack: %w", err)
+	}
+
+	c.logger.Info("Data connection established",
+		zap.String("tunnel_id", req.TunnelID),
+		zap.String("connection_id", req.ConnectionID),
+	)
+
+	// Handle data frames on this connection
+	return c.handleDataConnectionFrames(dataConn, reader)
+}
+
+// handleDataConnectionFrames handles frames on a data connection
+func (c *Connection) handleDataConnectionFrames(dataConn *DataConnection, reader *bufio.Reader) error {
+	defer func() {
+		// Get the group and remove this data connection
+		if group, ok := c.groupManager.GetGroup(c.tunnelID); ok {
+			group.RemoveDataConnection(dataConn.ID)
+		}
+	}()
+
+	for {
+		select {
+		case <-dataConn.stopCh:
+			return nil
+		default:
+		}
+
+		c.conn.SetReadDeadline(time.Now().Add(constants.RequestTimeout))
+		frame, err := protocol.ReadFrame(reader)
+		if err != nil {
+			// Timeout is OK, continue
+			if isTimeoutError(err) {
+				continue
+			}
+			return err
+		}
+
+		dataConn.mu.Lock()
+		dataConn.LastActive = time.Now()
+		dataConn.mu.Unlock()
+
+		sf := protocol.WithFrame(frame)
+
+		switch sf.Frame.Type {
+		case protocol.FrameTypeClose:
+			sf.Close()
+			c.logger.Info("Data connection closed by client",
+				zap.String("connection_id", dataConn.ID))
+			return nil
+
+		default:
+			sf.Close()
+			c.logger.Warn("Unexpected frame type on data connection",
+				zap.String("type", sf.Frame.Type.String()),
+				zap.String("connection_id", dataConn.ID),
+			)
+		}
 	}
 }
 
-func (c *Connection) sendWithBackpressure(frame *protocol.Frame) error {
-	c.mu.Lock()
-	for c.paused {
-		c.pauseCond.Wait()
+func isTimeoutError(err error) bool {
+	if err == nil {
+		return false
 	}
-	c.mu.Unlock()
-	return c.frameWriter.WriteFrame(frame)
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	// Fallback for wrapped errors without net.Error
+	return strings.Contains(err.Error(), "i/o timeout")
+}
+
+// sendDataConnectError sends a data connect error response
+func (c *Connection) sendDataConnectError(code, message string) {
+	resp := protocol.DataConnectResponse{
+		Accepted: false,
+		Message:  fmt.Sprintf("%s: %s", code, message),
+	}
+	respData, _ := json.Marshal(resp)
+	frame := protocol.NewFrame(protocol.FrameTypeDataConnectAck, respData)
+	protocol.WriteFrame(c.conn, frame)
 }

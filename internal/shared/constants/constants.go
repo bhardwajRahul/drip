@@ -9,6 +9,10 @@ const (
 	// DefaultWSPort is the default WebSocket port
 	DefaultWSPort = 8080
 
+	// YamuxAcceptBacklog controls how many incoming streams can be queued
+	// before yamux starts blocking stream opens under load.
+	YamuxAcceptBacklog = 4096
+
 	// HeartbeatInterval is how often clients send heartbeat messages
 	HeartbeatInterval = 2 * time.Second
 

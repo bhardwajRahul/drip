@@ -8,13 +8,11 @@ import (
 	"strings"
 	"time"
 
-	"drip/internal/client/cli/ui"
+	"drip/internal/shared/ui"
 	"github.com/spf13/cobra"
 )
 
-var (
-	interactiveMode bool
-)
+var interactiveMode bool
 
 var listCmd = &cobra.Command{
 	Use:   "list",
@@ -26,7 +24,7 @@ Example:
   drip list -i                  Interactive mode (select to attach/stop)
 
 This command shows:
-  - Tunnel type (HTTP/TCP)
+  - Tunnel type (HTTP/HTTPS/TCP)
   - Local port being tunneled
   - Public URL
   - Process ID (PID)
@@ -44,7 +42,7 @@ func init() {
 	rootCmd.AddCommand(listCmd)
 }
 
-func runList(cmd *cobra.Command, args []string) error {
+func runList(_ *cobra.Command, _ []string) error {
 	CleanupStaleDaemons()
 
 	daemons, err := ListAllDaemons()
@@ -99,7 +97,7 @@ func runList(cmd *cobra.Command, args []string) error {
 
 	fmt.Print(table.Render())
 
-	if interactiveMode || shouldPromptForAction() {
+	if interactiveMode {
 		return runInteractiveList(daemons)
 	}
 
@@ -112,13 +110,6 @@ func runList(cmd *cobra.Command, args []string) error {
 	}))
 
 	return nil
-}
-
-func shouldPromptForAction() bool {
-	if fileInfo, _ := os.Stdout.Stat(); (fileInfo.Mode() & os.ModeCharDevice) == 0 {
-		return false
-	}
-	return false
 }
 
 func runInteractiveList(daemons []*DaemonInfo) error {
@@ -161,9 +152,9 @@ func runInteractiveList(daemons []*DaemonInfo) error {
 		"",
 		ui.Muted("What would you like to do?"),
 		"",
-		ui.Cyan("  1.") + " Attach (view logs)",
-		ui.Cyan("  2.") + " Stop tunnel",
-		ui.Muted("  q.") + " Cancel",
+		ui.Cyan("  1.")+" Attach (view logs)",
+		ui.Cyan("  2.")+" Stop tunnel",
+		ui.Muted("  q.")+" Cancel",
 	))
 
 	fmt.Print(ui.Muted("Choose an action: "))

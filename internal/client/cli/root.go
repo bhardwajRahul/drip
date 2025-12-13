@@ -3,7 +3,7 @@ package cli
 import (
 	"fmt"
 
-	"drip/internal/client/cli/ui"
+	"drip/internal/shared/ui"
 
 	"github.com/spf13/cobra"
 )
@@ -56,14 +56,12 @@ func init() {
 	versionCmd.Flags().BoolVar(&versionPlain, "short", false, "Print version information without styling")
 
 	rootCmd.AddCommand(versionCmd)
-	// http and tcp commands are added in their respective init() functions
-	// config command is added in config.go init() function
 }
 
 var versionCmd = &cobra.Command{
 	Use:   "version",
 	Short: "Print version information",
-	Run: func(cmd *cobra.Command, args []string) {
+	Run: func(_ *cobra.Command, _ []string) {
 		if versionPlain {
 			fmt.Printf("Version: %s\nGit Commit: %s\nBuild Time: %s\n", Version, GitCommit, BuildTime)
 			return

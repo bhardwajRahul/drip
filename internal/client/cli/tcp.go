@@ -2,13 +2,10 @@ package cli
 
 import (
 	"fmt"
-	"os"
 	"strconv"
-	"time"
 
 	"drip/internal/client/tcp"
 	"drip/internal/shared/protocol"
-	"drip/pkg/config"
 
 	"github.com/spf13/cobra"
 )
@@ -47,55 +44,19 @@ func init() {
 	rootCmd.AddCommand(tcpCmd)
 }
 
-func runTCP(cmd *cobra.Command, args []string) error {
+func runTCP(_ *cobra.Command, args []string) error {
 	port, err := strconv.Atoi(args[0])
 	if err != nil || port < 1 || port > 65535 {
 		return fmt.Errorf("invalid port number: %s", args[0])
 	}
 
 	if daemonMode && !daemonMarker {
-		daemonArgs := append([]string{"tcp"}, args...)
-		daemonArgs = append(daemonArgs, "--daemon-child")
-		if subdomain != "" {
-			daemonArgs = append(daemonArgs, "--subdomain", subdomain)
-		}
-		if localAddress != "127.0.0.1" {
-			daemonArgs = append(daemonArgs, "--address", localAddress)
-		}
-		if serverURL != "" {
-			daemonArgs = append(daemonArgs, "--server", serverURL)
-		}
-		if authToken != "" {
-			daemonArgs = append(daemonArgs, "--token", authToken)
-		}
-		if insecure {
-			daemonArgs = append(daemonArgs, "--insecure")
-		}
-		if verbose {
-			daemonArgs = append(daemonArgs, "--verbose")
-		}
-		return StartDaemon("tcp", port, daemonArgs)
+		return StartDaemon("tcp", port, buildDaemonArgs("tcp", args, subdomain, localAddress))
 	}
 
-	var serverAddr, token string
-
-	if serverURL == "" {
-		cfg, err := config.LoadClientConfig("")
-		if err != nil {
-			return fmt.Errorf(`configuration not found.
-
-Please run 'drip config init' first, or use flags:
-  drip tcp %d --server SERVER:PORT --token TOKEN`, port)
-		}
-		serverAddr = cfg.Server
-		token = cfg.Token
-	} else {
-		serverAddr = serverURL
-		token = authToken
-	}
-
-	if serverAddr == "" {
-		return fmt.Errorf("server address is required")
+	serverAddr, token, err := resolveServerAddrAndToken("tcp", port)
+	if err != nil {
+		return err
 	}
 
 	connConfig := &tcp.ConnectorConfig{
@@ -110,15 +71,7 @@ Please run 'drip config init' first, or use flags:
 
 	var daemon *DaemonInfo
 	if daemonMarker {
-		daemon = &DaemonInfo{
-			PID:        os.Getpid(),
-			Type:       "tcp",
-			Port:       port,
-			Subdomain:  subdomain,
-			Server:     serverAddr,
-			StartTime:  time.Now(),
-			Executable: os.Args[0],
-		}
+		daemon = newDaemonInfo("tcp", port, subdomain, serverAddr)
 	}
 
 	return runTunnelWithUI(connConfig, daemon)

@@ -59,7 +59,7 @@ func init() {
 	serverCmd.Flags().IntVar(&serverPprofPort, "pprof", getEnvInt("DRIP_PPROF_PORT", 0), "Enable pprof on specified port (env: DRIP_PPROF_PORT)")
 }
 
-func runServer(cmd *cobra.Command, args []string) error {
+func runServer(_ *cobra.Command, _ []string) error {
 	if serverTLSCert == "" {
 		return fmt.Errorf("TLS certificate path is required (use --tls-cert flag or DRIP_TLS_CERT environment variable)")
 	}
@@ -126,11 +126,9 @@ func runServer(cmd *cobra.Command, args []string) error {
 
 	listenAddr := fmt.Sprintf("0.0.0.0:%d", serverPort)
 
-	responseHandler := proxy.NewResponseHandler(logger)
+	httpHandler := proxy.NewHandler(tunnelManager, logger, serverDomain, serverAuthToken)
 
-	httpHandler := proxy.NewHandler(tunnelManager, logger, responseHandler, serverDomain, serverAuthToken)
-
-	listener := tcp.NewListener(listenAddr, tlsConfig, serverAuthToken, tunnelManager, logger, portAllocator, serverDomain, displayPort, httpHandler, responseHandler)
+	listener := tcp.NewListener(listenAddr, tlsConfig, serverAuthToken, tunnelManager, logger, portAllocator, serverDomain, displayPort, httpHandler)
 
 	if err := listener.Start(); err != nil {
 		logger.Fatal("Failed to start TCP listener", zap.Error(err))
