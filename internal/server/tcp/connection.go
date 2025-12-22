@@ -23,6 +23,13 @@ import (
 	"go.uber.org/zap"
 )
 
+// bufioWriterPool reuses bufio.Writer instances to reduce GC pressure
+var bufioWriterPool = sync.Pool{
+	New: func() interface{} {
+		return bufio.NewWriterSize(nil, 4096)
+	},
+}
+
 type Connection struct {
 	conn          net.Conn
 	authToken     string
@@ -344,9 +351,13 @@ func (c *Connection) handleHTTPRequestLegacy(reader *bufio.Reader) error {
 			zap.String("host", req.Host),
 		)
 
+		// Get writer from pool to reduce GC pressure
+		pooledWriter := bufioWriterPool.Get().(*bufio.Writer)
+		pooledWriter.Reset(c.conn)
+
 		respWriter := &httpResponseWriter{
 			conn:   c.conn,
-			writer: bufio.NewWriterSize(c.conn, 4096),
+			writer: pooledWriter,
 			header: make(http.Header),
 		}
 
@@ -356,10 +367,12 @@ func (c *Connection) handleHTTPRequestLegacy(reader *bufio.Reader) error {
 			c.logger.Debug("Failed to flush HTTP response", zap.Error(err))
 		}
 
-		if tcpConn, ok := c.conn.(*net.TCPConn); ok {
-			tcpConn.SetNoDelay(true)
-			tcpConn.SetNoDelay(false)
-		}
+		// Return writer to pool
+		pooledWriter.Reset(nil) // Clear reference to connection
+		bufioWriterPool.Put(pooledWriter)
+
+		// Keep TCP_NODELAY enabled for low latency HTTP responses
+		// (removed the toggle that was disabling it)
 
 		c.logger.Debug("HTTP request processing completed",
 			zap.String("method", req.Method),

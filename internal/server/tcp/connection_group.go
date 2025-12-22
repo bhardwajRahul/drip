@@ -218,7 +218,7 @@ func (g *ConnectionGroup) OpenStream() (net.Conn, error) {
 	const (
 		maxStreamsPerSession = 256
 		maxRetries           = 3
-		backoffBase          = 25 * time.Millisecond
+		backoffBase          = 5 * time.Millisecond
 	)
 
 	var lastErr error
@@ -341,8 +341,8 @@ func (g *ConnectionGroup) selectSession() *yamux.Session {
 }
 
 func (g *ConnectionGroup) sessionsSnapshot(includePrimary bool) []*yamux.Session {
-	g.mu.Lock()
-	defer g.mu.Unlock()
+	g.mu.RLock()
+	defer g.mu.RUnlock()
 
 	if len(g.Sessions) == 0 {
 		return nil
@@ -351,17 +351,12 @@ func (g *ConnectionGroup) sessionsSnapshot(includePrimary bool) []*yamux.Session
 	sessions := make([]*yamux.Session, 0, len(g.Sessions))
 	for id, session := range g.Sessions {
 		if session == nil || session.IsClosed() {
-			delete(g.Sessions, id)
 			continue
 		}
 		if id == "primary" && !includePrimary {
 			continue
 		}
 		sessions = append(sessions, session)
-	}
-
-	if len(sessions) > 0 {
-		g.LastActivity = time.Now()
 	}
 
 	return sessions
