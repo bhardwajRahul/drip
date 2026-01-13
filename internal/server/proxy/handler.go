@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"html"
 	"io"
 	"net"
 	"net/http"
@@ -760,10 +761,12 @@ func (h *Handler) serveLoginPage(w http.ResponseWriter, r *http.Request, subdoma
 
 	errorHTML := ""
 	if errorMsg != "" {
-		errorHTML = fmt.Sprintf(`<p class="error">%s</p>`, errorMsg)
+		errorHTML = fmt.Sprintf(`<p class="error">%s</p>`, html.EscapeString(errorMsg))
 	}
 
-	html := fmt.Sprintf(`<!DOCTYPE html>
+	safeRedirectURL := html.EscapeString(redirectURL)
+
+	htmlContent := fmt.Sprintf(`<!DOCTYPE html>
 <html lang="en">
 <head>
 	<meta charset="UTF-8" />
@@ -839,10 +842,10 @@ func (h *Handler) serveLoginPage(w http.ResponseWriter, r *http.Request, subdoma
 		</footer>
 	</div>
 </body>
-</html>`, subdomain, subdomain, errorHTML, redirectURL)
+</html>`, subdomain, subdomain, errorHTML, safeRedirectURL)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
 	w.WriteHeader(http.StatusUnauthorized)
-	w.Write([]byte(html))
+	w.Write([]byte(htmlContent))
 }
