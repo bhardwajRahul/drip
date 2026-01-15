@@ -96,29 +96,23 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		cfg = &config.ServerConfig{}
 	}
 
-	// Configuration priority: flag > env > config file > default
-	// Note: flag variables already contain env defaults from init()
-	// We need to check if flag was explicitly set, or if env var exists
-
-	// Port: flag > env > config > default(8443)
+	// Port
 	if cmd.Flags().Changed("port") {
 		cfg.Port = serverPort
 	} else if os.Getenv("DRIP_PORT") != "" {
-		cfg.Port = serverPort // serverPort already has env value
+		cfg.Port = serverPort
 	} else if cfg.Port == 0 {
-		cfg.Port = serverPort // use default
+		cfg.Port = serverPort
 	}
 
-	// PublicPort: flag > env > config > default(0)
-	// Note: 0 is a valid value meaning "same as port"
+	// PublicPort
 	if cmd.Flags().Changed("public-port") {
 		cfg.PublicPort = serverPublicPort
 	} else if os.Getenv("DRIP_PUBLIC_PORT") != "" {
 		cfg.PublicPort = serverPublicPort
 	}
-	// else keep config file value (including 0)
 
-	// Domain: flag > env > config > default
+	// Domain
 	if cmd.Flags().Changed("domain") {
 		cfg.Domain = serverDomain
 	} else if os.Getenv("DRIP_DOMAIN") != "" {
@@ -127,38 +121,33 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		cfg.Domain = serverDomain
 	}
 
-	// TunnelDomain: flag > env > config > default("")
+	// TunnelDomain
 	if cmd.Flags().Changed("tunnel-domain") {
 		cfg.TunnelDomain = serverTunnelDomain
 	} else if os.Getenv("DRIP_TUNNEL_DOMAIN") != "" {
 		cfg.TunnelDomain = serverTunnelDomain
 	}
-	// else keep config file value
 
-	// AuthToken: flag > env > config > default("")
+	// AuthToken
 	if cmd.Flags().Changed("token") {
 		cfg.AuthToken = serverAuthToken
 	} else if os.Getenv("DRIP_TOKEN") != "" {
 		cfg.AuthToken = serverAuthToken
 	}
-	// else keep config file value
 
-	// MetricsToken: flag > env > config > default("")
+	// MetricsToken
 	if cmd.Flags().Changed("metrics-token") {
 		cfg.MetricsToken = serverMetricsToken
 	} else if os.Getenv("DRIP_METRICS_TOKEN") != "" {
 		cfg.MetricsToken = serverMetricsToken
 	}
-	// else keep config file value
 
-	// Debug: flag > config > default(false)
-	// Note: debug has no env var
+	// Debug
 	if cmd.Flags().Changed("debug") {
 		cfg.Debug = serverDebug
 	}
-	// else keep config file value
 
-	// TCPPortMin: flag > env > config > default
+	// TCPPortMin
 	if cmd.Flags().Changed("tcp-port-min") {
 		cfg.TCPPortMin = serverTCPPortMin
 	} else if os.Getenv("DRIP_TCP_PORT_MIN") != "" {
@@ -167,7 +156,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		cfg.TCPPortMin = serverTCPPortMin
 	}
 
-	// TCPPortMax: flag > env > config > default
+	// TCPPortMax
 	if cmd.Flags().Changed("tcp-port-max") {
 		cfg.TCPPortMax = serverTCPPortMax
 	} else if os.Getenv("DRIP_TCP_PORT_MAX") != "" {
@@ -176,32 +165,28 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		cfg.TCPPortMax = serverTCPPortMax
 	}
 
-	// TLSCertFile: flag > env > config > default("")
+	// TLSCertFile
 	if cmd.Flags().Changed("tls-cert") {
 		cfg.TLSCertFile = serverTLSCert
 	} else if os.Getenv("DRIP_TLS_CERT") != "" {
 		cfg.TLSCertFile = serverTLSCert
 	}
-	// else keep config file value
 
-	// TLSKeyFile: flag > env > config > default("")
+	// TLSKeyFile
 	if cmd.Flags().Changed("tls-key") {
 		cfg.TLSKeyFile = serverTLSKey
 	} else if os.Getenv("DRIP_TLS_KEY") != "" {
 		cfg.TLSKeyFile = serverTLSKey
 	}
-	// else keep config file value
 
-	// PprofPort: flag > env > config > default(0)
-	// Note: 0 is valid meaning "disabled"
+	// PprofPort
 	if cmd.Flags().Changed("pprof") {
 		cfg.PprofPort = serverPprofPort
 	} else if os.Getenv("DRIP_PPROF_PORT") != "" {
 		cfg.PprofPort = serverPprofPort
 	}
-	// else keep config file value
 
-	// AllowedTransports: flag > env > config > default
+	// AllowedTransports
 	if cmd.Flags().Changed("transports") {
 		cfg.AllowedTransports = parseCommaSeparated(serverTransports)
 	} else if os.Getenv("DRIP_TRANSPORTS") != "" {
@@ -210,7 +195,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		cfg.AllowedTransports = parseCommaSeparated(serverTransports)
 	}
 
-	// AllowedTunnelTypes: flag > env > config > default
+	// AllowedTunnelTypes
 	if cmd.Flags().Changed("tunnel-types") {
 		cfg.AllowedTunnelTypes = parseCommaSeparated(serverTunnelTypes)
 	} else if os.Getenv("DRIP_TUNNEL_TYPES") != "" {
@@ -219,15 +204,22 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		cfg.AllowedTunnelTypes = parseCommaSeparated(serverTunnelTypes)
 	}
 
-	// TLS is always enabled for server
-	cfg.TLSEnabled = true
-
-	// Validate required fields
-	if cfg.TLSCertFile == "" {
-		return fmt.Errorf("TLS certificate path is required (use --tls-cert flag, DRIP_TLS_CERT environment variable, or config file)")
+	// TLSEnabled
+	if os.Getenv("DRIP_TLS_ENABLED") != "" {
+		cfg.TLSEnabled = os.Getenv("DRIP_TLS_ENABLED") == "true" || os.Getenv("DRIP_TLS_ENABLED") == "1"
+	} else if cfg.TLSCertFile != "" && cfg.TLSKeyFile != "" {
+		if !cfg.TLSEnabled {
+			cfg.TLSEnabled = true
+		}
 	}
-	if cfg.TLSKeyFile == "" {
-		return fmt.Errorf("TLS private key path is required (use --tls-key flag, DRIP_TLS_KEY environment variable, or config file)")
+
+	if cfg.TLSEnabled {
+		if cfg.TLSCertFile == "" {
+			return fmt.Errorf("TLS certificate path is required when TLS is enabled (use --tls-cert flag, DRIP_TLS_CERT environment variable, or config file)")
+		}
+		if cfg.TLSKeyFile == "" {
+			return fmt.Errorf("TLS private key path is required when TLS is enabled (use --tls-key flag, DRIP_TLS_KEY environment variable, or config file)")
+		}
 	}
 
 	if err := utils.InitServerLogger(cfg.Debug); err != nil {
@@ -275,10 +267,14 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		logger.Fatal("Failed to load TLS configuration", zap.Error(err))
 	}
 
-	logger.Info("TLS 1.3 configuration loaded",
-		zap.String("cert", cfg.TLSCertFile),
-		zap.String("key", cfg.TLSKeyFile),
-	)
+	if cfg.TLSEnabled {
+		logger.Info("TLS 1.3 configuration loaded",
+			zap.String("cert", cfg.TLSCertFile),
+			zap.String("key", cfg.TLSKeyFile),
+		)
+	} else {
+		logger.Info("TLS disabled - running in plain TCP mode (for reverse proxy)")
+	}
 
 	tunnelManager := tunnel.NewManager(logger)
 
@@ -301,11 +297,16 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		logger.Fatal("Failed to start TCP listener", zap.Error(err))
 	}
 
+	protocol := "TCP (plain)"
+	if cfg.TLSEnabled {
+		protocol = "TCP over TLS 1.3"
+	}
+
 	logger.Info("Drip Server started",
 		zap.String("address", listenAddr),
 		zap.String("domain", cfg.Domain),
 		zap.String("tunnel_domain", cfg.TunnelDomain),
-		zap.String("protocol", "TCP over TLS 1.3"),
+		zap.String("protocol", protocol),
 		zap.Strings("transports", cfg.AllowedTransports),
 		zap.Strings("tunnel_types", cfg.AllowedTunnelTypes),
 	)

@@ -38,7 +38,7 @@
 ### 安装
 
 ```bash
-bash <(curl -sL https://raw.githubusercontent.com/Gouryella/drip/main/scripts/install.sh)
+bash <(curl -sL https://driptunnel.app/install.sh)
 ```
 
 ### 基本使用
