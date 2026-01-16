@@ -117,7 +117,7 @@ func (c *PoolClient) handleHTTPStream(stream net.Conn) {
 
 	resp, err := c.httpClient.Do(outReq)
 	if err != nil {
-		httputil.WriteProxyError(cc, http.StatusBadGateway, "Local service unavailable")
+		httputil.WriteLocalServiceUnavailable(cc, c.localPort)
 		return
 	}
 	defer resp.Body.Close()
