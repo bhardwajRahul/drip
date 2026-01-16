@@ -285,7 +285,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 
 	listenAddr := fmt.Sprintf("0.0.0.0:%d", cfg.Port)
 
-	httpHandler := proxy.NewHandler(tunnelManager, logger, cfg.TunnelDomain, cfg.AuthToken, cfg.MetricsToken)
+	httpHandler := proxy.NewHandler(tunnelManager, logger, cfg.Domain, cfg.TunnelDomain, cfg.AuthToken, cfg.MetricsToken)
 	httpHandler.SetAllowedTransports(cfg.AllowedTransports)
 	httpHandler.SetAllowedTunnelTypes(cfg.AllowedTunnelTypes)
 

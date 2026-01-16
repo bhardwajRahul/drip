@@ -93,7 +93,8 @@ func generateSessionToken() string {
 type Handler struct {
 	manager      *tunnel.Manager
 	logger       *zap.Logger
-	domain       string
+	serverDomain string
+	tunnelDomain string
 	authToken    string
 	metricsToken string
 	publicPort   int
@@ -130,11 +131,12 @@ func init() {
 	}
 }
 
-func NewHandler(manager *tunnel.Manager, logger *zap.Logger, domain string, authToken string, metricsToken string) *Handler {
+func NewHandler(manager *tunnel.Manager, logger *zap.Logger, serverDomain, tunnelDomain string, authToken string, metricsToken string) *Handler {
 	return &Handler{
 		manager:      manager,
 		logger:       logger,
-		domain:       domain,
+		serverDomain: serverDomain,
+		tunnelDomain: tunnelDomain,
 		authToken:    authToken,
 		metricsToken: metricsToken,
 		wsUpgrader: websocket.Upgrader{
@@ -230,15 +232,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	subdomain := h.extractSubdomain(r.Host)
-	if subdomain == "" {
+	subdomain, result := h.extractSubdomain(r.Host)
+	switch result {
+	case subdomainHome:
 		h.serveHomePage(w, r)
+		return
+	case subdomainNotFound:
+		h.serveTunnelNotFound(w, r)
 		return
 	}
 
 	tconn, ok := h.manager.Get(subdomain)
 	if !ok || tconn == nil {
-		http.Error(w, "Tunnel not found. The tunnel may have been closed.", http.StatusNotFound)
+		h.serveTunnelNotFound(w, r)
 		return
 	}
 	if tconn.IsClosed() {
@@ -495,21 +501,33 @@ func (h *Handler) rewriteLocationHeader(location, proxyHost string) string {
 	return location
 }
 
-func (h *Handler) extractSubdomain(host string) string {
+type subdomainResult int
+
+const (
+	subdomainHome subdomainResult = iota
+	subdomainFound
+	subdomainNotFound
+)
+
+func (h *Handler) extractSubdomain(host string) (string, subdomainResult) {
 	if idx := strings.Index(host, ":"); idx != -1 {
 		host = host[:idx]
 	}
 
-	if host == h.domain {
-		return ""
+	if host == h.serverDomain {
+		return "", subdomainHome
 	}
 
-	suffix := "." + h.domain
+	suffix := "." + h.tunnelDomain
 	if strings.HasSuffix(host, suffix) {
-		return strings.TrimSuffix(host, suffix)
+		return strings.TrimSuffix(host, suffix), subdomainFound
 	}
 
-	return ""
+	if host == h.tunnelDomain {
+		return "", subdomainNotFound
+	}
+
+	return "", subdomainNotFound
 }
 
 // extractClientIP extracts the client IP from the request.
@@ -572,6 +590,7 @@ func (h *Handler) serveHomePage(w http.ResponseWriter, r *http.Request) {
 	<meta charset="UTF-8" />
 	<meta name="viewport" content="width=device-width, initial-scale=1.0" />
 	<title>Drip - Your Tunnel, Your Domain, Anywhere</title>
+	` + faviconLink + `
 	<style>
 		* { margin: 0; padding: 0; box-sizing: border-box; }
 		body {
@@ -696,6 +715,77 @@ func (h *Handler) serveHomePage(w http.ResponseWriter, r *http.Request) {
 	data := []byte(html)
 	w.Header().Set("Content-Type", "text/html")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
+	w.Write(data)
+}
+
+func (h *Handler) serveTunnelNotFound(w http.ResponseWriter, r *http.Request) {
+	html := `<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+	<title>404 - Tunnel Not Found</title>
+	` + faviconLink + `
+	<style>
+		* { margin: 0; padding: 0; box-sizing: border-box; }
+		body {
+			font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+			background: #fff;
+			color: #24292f;
+			line-height: 1.6;
+		}
+		.container { max-width: 720px; margin: 0 auto; padding: 48px 24px; }
+		header { margin-bottom: 48px; }
+		h1 { font-size: 28px; font-weight: 600; margin-bottom: 8px; }
+		h1 span { margin-right: 8px; }
+		.desc { color: #57606a; font-size: 16px; }
+		p { margin-bottom: 16px; }
+		.info-box {
+			background: #f6f8fa;
+			border: 1px solid #d0d7de;
+			border-radius: 6px;
+			padding: 16px;
+			margin: 24px 0;
+		}
+		.info-box ul {
+			margin: 12px 0 0 20px;
+			color: #57606a;
+		}
+		.info-box li { margin-bottom: 8px; }
+		footer { margin-top: 48px; padding-top: 24px; border-top: 1px solid #d0d7de; }
+		footer a { color: #57606a; text-decoration: none; font-size: 14px; }
+		footer a:hover { color: #0969da; }
+	</style>
+</head>
+<body>
+	<div class="container">
+		<header>
+			<h1><span>🔍</span>Tunnel Not Found</h1>
+			<p class="desc">The requested tunnel does not exist or has been closed.</p>
+		</header>
+
+		<div class="info-box">
+			<p>This could happen because:</p>
+			<ul>
+				<li>The tunnel was never created</li>
+				<li>The tunnel has been closed by the owner</li>
+				<li>The tunnel URL is incorrect</li>
+			</ul>
+		</div>
+
+		<p>If you are the tunnel owner, please restart your tunnel client.</p>
+
+		<footer>
+			<a href="https://github.com/Gouryella/drip" target="_blank">GitHub</a>
+		</footer>
+	</div>
+</body>
+</html>`
+
+	data := []byte(html)
+	w.Header().Set("Content-Type", "text/html")
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
+	w.WriteHeader(http.StatusNotFound)
 	w.Write(data)
 }
 
@@ -864,6 +954,7 @@ func (h *Handler) serveLoginPage(w http.ResponseWriter, r *http.Request, subdoma
 	<meta charset="UTF-8" />
 	<meta name="viewport" content="width=device-width, initial-scale=1.0" />
 	<title>%s - Drip</title>
+	`+faviconLink+`
 	<style>
 		* { margin: 0; padding: 0; box-sizing: border-box; }
 		body {
