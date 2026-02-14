@@ -242,6 +242,7 @@ func buildConnectorConfig(cfg *config.ClientConfig, t *config.TunnelConfig) *tcp
 		AuthPass:   t.Auth,
 		AuthBearer: t.AuthBearer,
 		Transport:  transport,
+		Bandwidth:  parseBandwidthOrZero(t.Bandwidth),
 	}
 }
 
@@ -250,4 +251,9 @@ func getAddress(t *config.TunnelConfig) string {
 		return t.Address
 	}
 	return "127.0.0.1"
+}
+
+func parseBandwidthOrZero(s string) int64 {
+	bw, _ := parseBandwidth(s)
+	return bw
 }
