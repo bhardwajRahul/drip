@@ -14,6 +14,7 @@ type FrameWriter struct {
 	controlQueue chan *Frame
 	batch        []*Frame
 	mu           sync.Mutex
+	enqueueMu    sync.RWMutex
 	done         chan struct{}
 	closed       bool
 
@@ -210,6 +211,9 @@ func (w *FrameWriter) WriteFrameWithCancel(frame *Frame, cancel <-chan struct{})
 		return nil
 	}
 
+	w.enqueueMu.RLock()
+	defer w.enqueueMu.RUnlock()
+
 	w.mu.Lock()
 	if w.closed {
 		w.mu.Unlock()
@@ -292,6 +296,9 @@ func (w *FrameWriter) WriteFrameWithCancel(frame *Frame, cancel <-chan struct{})
 }
 
 func (w *FrameWriter) Close() error {
+	w.enqueueMu.Lock()
+	defer w.enqueueMu.Unlock()
+
 	w.mu.Lock()
 	if w.closed {
 		w.mu.Unlock()
@@ -388,6 +395,9 @@ func (w *FrameWriter) WriteControl(frame *Frame) error {
 	if frame == nil {
 		return nil
 	}
+
+	w.enqueueMu.RLock()
+	defer w.enqueueMu.RUnlock()
 
 	w.mu.Lock()
 	if w.closed {

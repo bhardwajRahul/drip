@@ -21,6 +21,7 @@ type ConnectionGroupManager struct {
 	cleanupInterval time.Duration
 	staleTimeout    time.Duration
 	stopCh          chan struct{}
+	closeOnce       sync.Once
 }
 
 // NewConnectionGroupManager creates a new connection group manager
@@ -123,19 +124,21 @@ func (m *ConnectionGroupManager) cleanupStaleGroups() {
 
 // Close shuts down the manager
 func (m *ConnectionGroupManager) Close() {
-	close(m.stopCh)
+	m.closeOnce.Do(func() {
+		close(m.stopCh)
 
-	// Collect all groups under lock
-	m.mu.Lock()
-	groups := make([]*ConnectionGroup, 0, len(m.groups))
-	for _, group := range m.groups {
-		groups = append(groups, group)
-	}
-	m.groups = make(map[string]*ConnectionGroup)
-	m.mu.Unlock()
+		// Collect all groups under lock
+		m.mu.Lock()
+		groups := make([]*ConnectionGroup, 0, len(m.groups))
+		for _, group := range m.groups {
+			groups = append(groups, group)
+		}
+		m.groups = make(map[string]*ConnectionGroup)
+		m.mu.Unlock()
 
-	// Close groups without holding lock
-	for _, group := range groups {
-		group.Close()
-	}
+		// Close groups without holding lock
+		for _, group := range groups {
+			group.Close()
+		}
+	})
 }

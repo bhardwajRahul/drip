@@ -26,9 +26,10 @@ const (
 )
 
 var (
-	ErrTooManyTunnels    = errors.New("maximum tunnel limit reached")
-	ErrTooManyPerIP      = errors.New("maximum tunnels per IP reached")
-	ErrRateLimitExceeded = errors.New("rate limit exceeded, try again later")
+	ErrTooManyTunnels            = errors.New("maximum tunnel limit reached")
+	ErrTooManyPerIP              = errors.New("maximum tunnels per IP reached")
+	ErrRateLimitExceeded         = errors.New("rate limit exceeded, try again later")
+	ErrSubdomainGenerationFailed = errors.New("failed to generate unique subdomain")
 )
 
 // shard holds a subset of tunnels with its own lock
@@ -58,7 +59,8 @@ type Manager struct {
 	rateLimiter *RateLimiter
 
 	// Lifecycle
-	stopCh chan struct{}
+	stopCh       chan struct{}
+	shutdownOnce sync.Once
 }
 
 // ManagerConfig holds configuration for the Manager
@@ -209,6 +211,23 @@ func (m *Manager) RegisterWithIP(conn *websocket.Conn, customSubdomain string, r
 
 	var subdomain string
 
+	registerSubdomain := func(candidate string) bool {
+		s := m.getShard(candidate)
+		s.mu.Lock()
+		defer s.mu.Unlock()
+
+		if s.used[candidate] {
+			return false
+		}
+
+		tc := NewConnection(candidate, conn, m.logger)
+		tc.remoteIP = remoteIP
+		s.tunnels[candidate] = tc
+		s.used[candidate] = true
+		subdomain = candidate
+		return true
+	}
+
 	if customSubdomain != "" {
 		// Validate custom subdomain
 		if !utils.ValidateSubdomain(customSubdomain) {
@@ -222,34 +241,44 @@ func (m *Manager) RegisterWithIP(conn *websocket.Conn, customSubdomain string, r
 			return "", ErrReservedSubdomain
 		}
 
-		// Check if subdomain is taken in its shard
-		s := m.getShard(customSubdomain)
-		s.mu.Lock()
-		if s.used[customSubdomain] {
-			s.mu.Unlock()
+		if !registerSubdomain(customSubdomain) {
 			rollbackPerIP()
 			rollbackGlobal()
 			return "", ErrSubdomainTaken
 		}
-		subdomain = customSubdomain
-
-		// Register in shard
-		tc := NewConnection(subdomain, conn, m.logger)
-		tc.remoteIP = remoteIP
-		s.tunnels[subdomain] = tc
-		s.used[subdomain] = true
-		s.mu.Unlock()
 	} else {
-		// Generate unique random subdomain
-		subdomain = m.generateUniqueSubdomain()
+		const maxAttempts = 32
+		registered := false
 
-		s := m.getShard(subdomain)
-		s.mu.Lock()
-		tc := NewConnection(subdomain, conn, m.logger)
-		tc.remoteIP = remoteIP
-		s.tunnels[subdomain] = tc
-		s.used[subdomain] = true
-		s.mu.Unlock()
+		for i := 0; i < maxAttempts; i++ {
+			candidate := utils.GenerateSubdomain(6)
+			if utils.IsReserved(candidate) {
+				continue
+			}
+			if registerSubdomain(candidate) {
+				registered = true
+				break
+			}
+		}
+
+		if !registered {
+			for i := 0; i < maxAttempts; i++ {
+				candidate := utils.GenerateSubdomain(8)
+				if utils.IsReserved(candidate) {
+					continue
+				}
+				if registerSubdomain(candidate) {
+					registered = true
+					break
+				}
+			}
+		}
+
+		if !registered {
+			rollbackPerIP()
+			rollbackGlobal()
+			return "", ErrSubdomainGenerationFailed
+		}
 	}
 
 	// Get connection and start write pump
@@ -419,50 +448,28 @@ func (m *Manager) StartCleanupTask(interval, timeout time.Duration) {
 	}()
 }
 
-// generateUniqueSubdomain generates a unique random subdomain
-func (m *Manager) generateUniqueSubdomain() string {
-	const maxAttempts = 10
-
-	for i := 0; i < maxAttempts; i++ {
-		subdomain := utils.GenerateSubdomain(6)
-		if utils.IsReserved(subdomain) {
-			continue
-		}
-
-		s := m.getShard(subdomain)
-		s.mu.RLock()
-		taken := s.used[subdomain]
-		s.mu.RUnlock()
-
-		if !taken {
-			return subdomain
-		}
-	}
-
-	// Fallback: use longer subdomain if collision persists
-	return utils.GenerateSubdomain(8)
-}
-
 // Shutdown gracefully shuts down all tunnels
 func (m *Manager) Shutdown() {
-	// Signal cleanup goroutine to stop
-	close(m.stopCh)
+	m.shutdownOnce.Do(func() {
+		// Signal cleanup goroutine to stop
+		close(m.stopCh)
 
-	m.logger.Info("Shutting down tunnel manager",
-		zap.Int64("active_tunnels", m.tunnelCount.Load()),
-	)
+		m.logger.Info("Shutting down tunnel manager",
+			zap.Int64("active_tunnels", m.tunnelCount.Load()),
+		)
 
-	// Close all tunnels in each shard
-	for i := 0; i < numShards; i++ {
-		s := &m.shards[i]
-		s.mu.Lock()
-		for _, tc := range s.tunnels {
-			tc.Close()
+		// Close all tunnels in each shard
+		for i := 0; i < numShards; i++ {
+			s := &m.shards[i]
+			s.mu.Lock()
+			for _, tc := range s.tunnels {
+				tc.Close()
+			}
+			s.tunnels = make(map[string]*Connection)
+			s.used = make(map[string]bool)
+			s.mu.Unlock()
 		}
-		s.tunnels = make(map[string]*Connection)
-		s.used = make(map[string]bool)
-		s.mu.Unlock()
-	}
 
-	m.tunnelCount.Store(0)
+		m.tunnelCount.Store(0)
+	})
 }

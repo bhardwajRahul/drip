@@ -13,6 +13,7 @@ import (
 	"drip/internal/server/metrics"
 	"drip/internal/server/proxy"
 	"drip/internal/server/tunnel"
+	"drip/internal/shared/netutil"
 	"drip/internal/shared/pool"
 	"drip/internal/shared/recovery"
 	"drip/internal/shared/utils"
@@ -47,6 +48,7 @@ type Listener struct {
 	httpHandler  http.Handler
 	listener     net.Listener
 	stopCh       chan struct{}
+	stopOnce     sync.Once
 	wg           sync.WaitGroup
 	connections  map[string]*Connection
 	connMu       sync.RWMutex
@@ -223,6 +225,13 @@ func (l *Listener) handleConnection(netConn net.Conn) {
 		l.connMu.Unlock()
 	})
 
+	cleanupRegistered := false
+	defer func() {
+		if !cleanupRegistered {
+			_ = netConn.Close()
+		}
+	}()
+
 	// Handle TLS connections
 	if tlsConn, ok := netConn.(*tls.Conn); ok {
 		if err := tlsConn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
@@ -322,6 +331,7 @@ func (l *Listener) handleConnection(netConn net.Conn) {
 			netConn.Close()
 		}
 	}()
+	cleanupRegistered = true
 
 	if err := conn.Handle(); err != nil {
 		errStr := err.Error()
@@ -345,46 +355,49 @@ func (l *Listener) handleConnection(netConn net.Conn) {
 }
 
 func (l *Listener) Stop() error {
-	l.logger.Info("Stopping TCP listener")
+	l.stopOnce.Do(func() {
+		l.logger.Info("Stopping TCP listener")
 
-	close(l.stopCh)
+		close(l.stopCh)
 
-	if l.httpServer != nil {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if err := l.httpServer.Shutdown(shutdownCtx); err != nil {
-			l.logger.Warn("HTTP server shutdown error", zap.Error(err))
+		if l.httpServer != nil {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := l.httpServer.Shutdown(shutdownCtx); err != nil {
+				l.logger.Warn("HTTP server shutdown error", zap.Error(err))
+			}
+			l.logger.Info("HTTP server shutdown complete")
 		}
-		l.logger.Info("HTTP server shutdown complete")
-	}
 
-	if l.httpListener != nil {
-		l.httpListener.Close()
-	}
-
-	if l.listener != nil {
-		if err := l.listener.Close(); err != nil {
-			l.logger.Error("Failed to close listener", zap.Error(err))
+		if l.httpListener != nil {
+			l.httpListener.Close()
 		}
-	}
 
-	l.connMu.Lock()
-	for _, conn := range l.connections {
-		conn.Close()
-	}
-	l.connMu.Unlock()
+		if l.listener != nil {
+			if err := l.listener.Close(); err != nil {
+				l.logger.Error("Failed to close listener", zap.Error(err))
+			}
+		}
 
-	l.wg.Wait()
+		l.connMu.Lock()
+		for _, conn := range l.connections {
+			conn.Close()
+		}
+		l.connMu.Unlock()
 
-	if l.workerPool != nil {
-		l.workerPool.Close()
-	}
+		l.wg.Wait()
 
-	if l.groupManager != nil {
-		l.groupManager.Close()
-	}
+		if l.workerPool != nil {
+			l.workerPool.Close()
+		}
 
-	l.logger.Info("TCP listener stopped")
+		if l.groupManager != nil {
+			l.groupManager.Close()
+		}
+
+		l.logger.Info("TCP listener stopped")
+	})
+
 	return nil
 }
 
@@ -408,6 +421,14 @@ func (l *Listener) HandleWSConnection(conn net.Conn, remoteAddr string) {
 		zap.String("remote_addr", connID),
 	)
 
+	remoteIP := netutil.ExtractIP(remoteAddr)
+	if remoteIP == "" {
+		remoteIP = netutil.ExtractIP(conn.RemoteAddr().String())
+	}
+	if netutil.IsPrivateIP(remoteIP) {
+		remoteIP = ""
+	}
+
 	// Create connection handler (no TLS verification needed - already done by HTTP server)
 	tcpConn := NewConnection(ConnectionConfig{
 		Conn:         conn,
@@ -421,6 +442,7 @@ func (l *Listener) HandleWSConnection(conn net.Conn, remoteAddr string) {
 		HTTPHandler:  l.httpHandler,
 		GroupManager: l.groupManager,
 		HTTPListener: l.httpListener,
+		RemoteIP:     remoteIP,
 	})
 	tcpConn.SetAllowedTunnelTypes(l.allowedTunnelTypes)
 	tcpConn.SetAllowedTransports(l.allowedTransports)

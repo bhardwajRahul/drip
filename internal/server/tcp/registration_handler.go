@@ -52,6 +52,7 @@ type RegistrationRequest struct {
 	IPAccess         *protocol.IPAccessControl
 	ProxyAuth        *protocol.ProxyAuth
 	LocalPort        int
+	RemoteIP         string
 }
 
 // RegistrationResult contains the result of a registration attempt.
@@ -94,7 +95,7 @@ func (rh *RegistrationHandler) Register(req *RegistrationRequest) (*Registration
 	}
 
 	// Register with tunnel manager
-	subdomain, err := rh.manager.Register(nil, req.CustomSubdomain)
+	subdomain, err := rh.manager.RegisterWithIP(nil, req.CustomSubdomain, req.RemoteIP)
 	if err != nil {
 		if port > 0 && rh.portAlloc != nil {
 			rh.portAlloc.Release(port)
