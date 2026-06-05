@@ -137,6 +137,11 @@ func (c *PoolClient) handleHTTPStream(stream net.Conn) {
 		_ = stream.SetWriteDeadline(time.Time{})
 	}
 
+	if isSSE && req.ContentLength == 0 {
+		stopWatchingDisconnect := watchStreamDisconnect(ctx, stream, cancel, resp.Body)
+		defer stopWatchingDisconnect()
+	}
+
 	stopCopy := context.AfterFunc(ctx, func() { _ = stream.Close() })
 	defer stopCopy()
 
@@ -158,6 +163,38 @@ func (c *PoolClient) handleHTTPStream(stream net.Conn) {
 		if er != nil {
 			break
 		}
+	}
+}
+
+func watchStreamDisconnect(ctx context.Context, stream net.Conn, cancel context.CancelFunc, body io.Closer) func() {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+
+		buf := make([]byte, 1)
+		for {
+			_, err := stream.Read(buf)
+			if err != nil {
+				cancel()
+				_ = body.Close()
+				return
+			}
+
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+		}
+	}()
+
+	return func() {
+		_ = stream.SetReadDeadline(time.Now())
+		select {
+		case <-done:
+		case <-time.After(100 * time.Millisecond):
+		}
+		_ = stream.SetReadDeadline(time.Time{})
 	}
 }
 

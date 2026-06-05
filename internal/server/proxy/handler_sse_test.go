@@ -21,6 +21,11 @@ const testTunnelDomain = "tunnels.test"
 
 func newProxySSETestServer(t *testing.T, streamHandler func(net.Conn)) *httptest.Server {
 	t.Helper()
+	return newProxySSETestServerWithWriteTimeout(t, 0, streamHandler)
+}
+
+func newProxySSETestServerWithWriteTimeout(t *testing.T, writeTimeout time.Duration, streamHandler func(net.Conn)) *httptest.Server {
+	t.Helper()
 
 	logger := zap.NewNop()
 	manager := tunnel.NewManagerWithConfig(logger, tunnel.ManagerConfig{
@@ -56,7 +61,10 @@ func newProxySSETestServer(t *testing.T, streamHandler func(net.Conn)) *httptest
 		TunnelDomain: testTunnelDomain,
 	})
 
-	return httptest.NewServer(handler)
+	server := httptest.NewUnstartedServer(handler)
+	server.Config.WriteTimeout = writeTimeout
+	server.Start()
+	return server
 }
 
 func readProxyRequest(t *testing.T, conn net.Conn) {
@@ -164,6 +172,38 @@ func TestHandlerFlushesEventStreamResponse(t *testing.T) {
 	got := readBodyWithin(t, resp.Body, len("data: first\n\n"), 500*time.Millisecond)
 	if got != "data: first\n\n" {
 		t.Fatalf("body prefix = %q, want first SSE event", got)
+	}
+
+	releaseOnce.Do(func() { close(release) })
+}
+
+func TestHandlerClearsWriteDeadlineForSlowEventStream(t *testing.T) {
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+
+	server := newProxySSETestServerWithWriteTimeout(t, 100*time.Millisecond, func(conn net.Conn) {
+		defer conn.Close()
+		readProxyRequest(t, conn)
+		_, _ = fmt.Fprint(conn,
+			"HTTP/1.1 200 OK\r\n"+
+				"Content-Type: text/event-stream\r\n"+
+				"Cache-Control: no-cache\r\n"+
+				"\r\n")
+		time.Sleep(250 * time.Millisecond)
+		_, _ = fmt.Fprint(conn, "data: delayed\n\n")
+		<-release
+	})
+	defer func() {
+		releaseOnce.Do(func() { close(release) })
+		server.Close()
+	}()
+
+	resp := doProxyRequestWithin(t, server, "/events", time.Second)
+	defer resp.Body.Close()
+
+	got := readBodyWithin(t, resp.Body, len("data: delayed\n\n"), time.Second)
+	if got != "data: delayed\n\n" {
+		t.Fatalf("body prefix = %q, want delayed SSE event", got)
 	}
 
 	releaseOnce.Do(func() { close(release) })

@@ -348,6 +348,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer stop()
 
 	if streamingResponse {
+		clearResponseWriteDeadline(w)
 		flushResponse(w)
 		_, _ = copyResponseBodyFlushing(w, resp.Body)
 		return

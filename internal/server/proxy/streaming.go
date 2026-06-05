@@ -3,9 +3,14 @@ package proxy
 import (
 	"io"
 	"net/http"
+	"time"
 
 	"drip/internal/shared/pool"
 )
+
+func clearResponseWriteDeadline(w http.ResponseWriter) {
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
+}
 
 func flushResponse(w http.ResponseWriter) {
 	if flusher, ok := w.(http.Flusher); ok {
