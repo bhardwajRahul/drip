@@ -127,9 +127,14 @@ func (c *PoolClient) handleHTTPStream(stream net.Conn) {
 	}
 	defer resp.Body.Close()
 
+	isSSE := httputil.IsEventStream(resp.Header)
+
 	_ = stream.SetWriteDeadline(time.Now().Add(30 * time.Second))
 	if err := writeResponseHeader(cc, resp); err != nil {
 		return
+	}
+	if isSSE {
+		_ = stream.SetWriteDeadline(time.Time{})
 	}
 
 	stopCopy := context.AfterFunc(ctx, func() { _ = stream.Close() })
@@ -139,8 +144,13 @@ func (c *PoolClient) handleHTTPStream(stream net.Conn) {
 	for {
 		nr, er := resp.Body.Read(buf)
 		if nr > 0 {
-			_ = stream.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if !isSSE {
+				_ = stream.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			}
 			nw, ew := cc.Write(buf[:nr])
+			if isSSE {
+				_ = stream.SetWriteDeadline(time.Time{})
+			}
 			if ew != nil || nr != nw {
 				break
 			}
